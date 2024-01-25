@@ -269,7 +269,10 @@ add_library(Xlorie SHARED
         "lorie/InitOutput.c"
         "lorie/InitInput.c"
         "lorie/InputXKB.c"
-        "lorie/renderer.c")
+        "lorie/renderer.c"
+        "lorie/vkrender/vulkan.c"
+        "lorie/vkrender/screen.c"
+        "lorie/vkrender/pixmap.c")
 target_include_directories(Xlorie PRIVATE ${inc} "libxcvt/include")
 target_link_options(Xlorie PRIVATE "-Wl,--as-needed" "-Wl,--no-undefined" "-fvisibility=hidden")
 target_link_libraries(Xlorie "-Wl,--whole-archive" ${XSERVER_LIBS} "-Wl,--no-whole-archive" android log m z EGL GLESv2)

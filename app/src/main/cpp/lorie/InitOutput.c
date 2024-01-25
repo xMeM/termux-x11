@@ -79,6 +79,8 @@ from The Open Group.
 #include "inpututils.h"
 #include "lorie.h"
 
+#include "vkrender/public.h"
+
 #define unused __attribute__((unused))
 #define wrap(priv, real, mem, func) { priv->mem = real->mem; real->mem = func; }
 #define unwrap(priv, real, mem) { real->mem = priv->mem; }
@@ -346,6 +348,8 @@ static void lorieUpdateBuffer(void) {
         pScreenPtr->ModifyPixmapHeader(pScreenPtr->devPrivate, d0.width, d0.height, 32, 32, d0.stride * 4, data0);
 
         renderer_set_buffer(new);
+
+        vk_render_PixmapUpdateBuffer(pScreenPtr, pScreenPtr->devPrivate, new);
     }
 
     if (old) {
@@ -416,16 +420,21 @@ static inline Bool loriePixmapLock(PixmapPtr pixmap) {
 static void lorieTimerCallback(int fd, unused int r, void *arg) {
     char dummy[8];
     read(fd, dummy, 8);
+    ScreenPtr pScreen = (ScreenPtr) arg;
+    PixmapPtr pPixmap = pScreen->GetScreenPixmap(pScreen);
+
     if (renderer_should_redraw() && RegionNotEmpty(DamageRegion(pvfb->damage))) {
         int redrawn = FALSE;
-        ScreenPtr pScreen = (ScreenPtr) arg;
 
-        loriePixmapUnlock(pScreen->GetScreenPixmap(pScreen));
+        loriePixmapUnlock(pPixmap);
         redrawn = renderer_redraw(pvfb->root.flip);
-        if (loriePixmapLock(pScreen->GetScreenPixmap(pScreen)) && redrawn)
+        if (loriePixmapLock(pPixmap) && redrawn)
             DamageEmpty(pvfb->damage);
-    } else if (pvfb->cursorMoved)
+    } else if (pvfb->cursorMoved) {
+        loriePixmapUnlock(pPixmap);
         renderer_redraw(pvfb->root.flip);
+        loriePixmapLock(pPixmap);
+    }
 
     pvfb->cursorMoved = FALSE;
 }
@@ -629,7 +638,7 @@ lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **argv) {
           || !lorieRandRInit(pScreen)
           || !miPointerInitialize(pScreen, &loriePointerSpriteFuncs, &loriePointerCursorFuncs, TRUE)
           || !fbCreateDefColormap(pScreen)
-          || !dri3_screen_init(pScreen, &dri3Info)
+          || !vk_render_screen_init(pScreen)
           || !dixRegisterPrivateKey(&loriePixmapPrivateKeyRec, PRIVATE_PIXMAP, 0))
         return FALSE;
 
