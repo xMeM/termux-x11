@@ -206,3 +206,55 @@ index f9b7b06d9..f4b2aeddc 100644
      free(xkbbasedirflag);
  
      if (!buf) {
+diff --git a/glamor/glamor.c b/glamor/glamor.c
+index da2ea94ba..d2f521671 100644
+--- a/glamor/glamor.c
++++ b/glamor/glamor.c
+@@ -670,9 +670,6 @@ glamor_init(ScreenPtr screen, unsigned int flags)
+      * register correct close screen function. */
+     if (flags & GLAMOR_USE_EGL_SCREEN) {
+         glamor_egl_screen_init(screen, &glamor_priv->ctx);
+-    } else {
+-        if (!glamor_glx_screen_init(&glamor_priv->ctx))
+-            goto fail;
+     }
+ 
+     glamor_make_current(glamor_priv);
+@@ -766,11 +763,6 @@ glamor_init(ScreenPtr screen, unsigned int flags)
+             ErrorF("GL_EXT_texture_format_BGRA8888 required\n");
+             goto fail;
+         }
+-
+-        if (!epoxy_has_gl_extension("GL_OES_texture_border_clamp")) {
+-            ErrorF("GL_OES_texture_border_clamp required\n");
+-            goto fail;
+-        }
+     }
+ 
+     if (!epoxy_has_gl_extension("GL_ARB_vertex_array_object") &&
+@@ -823,15 +815,6 @@ glamor_init(ScreenPtr screen, unsigned int flags)
+     glamor_priv->use_quads = !glamor_priv->is_gles &&
+                              !glamor_priv->is_core_profile;
+ 
+-    /* Driver-specific hack: Avoid using GL_QUADS on VC4, where
+-     * they'll be emulated more expensively than we can with our
+-     * cached IB.
+-     */
+-    if (strstr((char *)glGetString(GL_VENDOR), "Broadcom") &&
+-        (strstr((char *)glGetString(GL_RENDERER), "VC4") ||
+-         strstr((char *)glGetString(GL_RENDERER), "V3D")))
+-        glamor_priv->use_quads = FALSE;
+-
+     glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &glamor_priv->max_fbo_size);
+     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &glamor_priv->max_fbo_size);
+     glGetIntegerv(GL_MAX_VIEWPORT_DIMS, max_viewport_size);
+diff --git a/glamor/glamor_context.h b/glamor/glamor_context.h
+index 47b87e620..ba83362c6 100644
+--- a/glamor/glamor_context.h
++++ b/glamor/glamor_context.h
+@@ -45,5 +45,3 @@ struct glamor_context {
+ 
+     void (*make_current)(struct glamor_context *glamor_ctx);
+ };
+-
+-Bool glamor_glx_screen_init(struct glamor_context *glamor_ctx);
