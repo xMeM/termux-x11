@@ -3,7 +3,9 @@
 #include <gcstruct.h>
 #include <privates.h>
 #include <scrnintstr.h>
+#include <dlfcn.h>
 #include <dri3.h>
+#include <unistd.h>
 #include <sys/mman.h>
 #include <fb.h>
 #include <android/hardware_buffer.h>
@@ -11,7 +13,8 @@
 #include <errno.h>
 #include "screenint.h"
 #include "lorie.h"
-#include "renderer.h"
+#include "lorie_glamor_egl.h"
+#include "glamor.h"
 
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
 
@@ -63,6 +66,7 @@ typedef struct {
 
 typedef struct {
     AHardwareBuffer* buffer;
+    EGLImage image;
 } LorieAHBPixPrivRec, *LorieAHBPixPrivPtr;
 
 static Bool FalseNoop() { return FALSE; }
@@ -422,13 +426,37 @@ lorieDestroyPixmap(PixmapPtr pPixmap) {
         munmap(ptr, size);
 
     if (pPixPriv) {
-        if (pPixPriv->buffer)
+        if (pPixPriv->image) {
+            lorieGlamorEGLDestroyImage(pPixPriv->image);
+        }
+        if (pPixPriv->buffer) {
             AHardwareBuffer_release(pPixPriv->buffer);
+        }
         free(pPixPriv);
     }
 
     return ret;
 }
+
+typedef struct native_handle
+{
+    int version;        /* sizeof(native_handle_t) */
+    int numFds;         /* number of file-descriptors at &data[0] */
+    int numInts;        /* number of ints at &data[numFds] */
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wzero-length-array"
+#endif
+    int data[0];        /* numFds + numInts ints */
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+} native_handle_t;
+
+static const native_handle_t* _Nullable (*AHardwareBuffer_getNativeHandle)(
+    const AHardwareBuffer* _Nonnull buffer);
+
+#define AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM 5
 
 static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *fds, CARD16 width, CARD16 height,
                                     const CARD32 *strides, const CARD32 *offsets, CARD8 depth, __unused CARD8 bpp, CARD64 modifier) {
@@ -447,17 +475,16 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
     }
 
     if (modifier == RAW_MMAPPABLE_FD) {
-        void *addr = mmap(NULL, strides[0] * height, PROT_READ, MAP_SHARED, fds[0], offsets[0]);
-        if (!addr || addr == MAP_FAILED) {
-            log(ERROR, "DRI3: RAW_MMAPPABLE_FD: mmap failed");
-            return NULL;
-        }
-
         pixmap = fbCreatePixmap(screen, 0, 0, depth, 0);
         if (!pixmap) {
             log(ERROR, "DRI3: RAW_MMAPPABLE_FD: failed to create pixmap");
-            munmap(addr, strides[0] * height);
-            return NULL;
+            goto fail;
+        }
+
+        void *addr = mmap(0, strides[0] * height, PROT_READ | PROT_WRITE, MAP_SHARED, fds[0], offsets[0]);
+        if (!addr || addr == MAP_FAILED) {
+            log(ERROR, "DRI3: RAW_MMAPPABLE_FD: mmap failed");
+            goto fail;
         }
 
         dixSetPrivate(&pixmap->devPrivates, &lorieMmappedPixPrivateKey, addr);
@@ -490,8 +517,6 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
             goto fail;
         }
 
-        dixSetPrivate(&pixmap->devPrivates, &lorieAHBPixPrivateKey, pPixPriv);
-
         // Sending signal to other end of socket to send buffer.
         uint8_t buf = 1;
         if (write(fds[0], &buf, 1) != 1) {
@@ -509,16 +534,28 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
             goto fail;
         }
 
-        AHardwareBuffer_describe(pPixPriv->buffer, &desc);
-        if (desc.format != AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM
-             && desc.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM
-             && desc.format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM) {
-            log(ERROR, "DRI3: AHARDWAREBUFFER_SOCKET_FD: wrong format of AHardwareBuffer. Must be one of: AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM, AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM, AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM (stands for 5).");
+        pPixPriv->image = lorieGlamorEGLCreateImageFromAHardwareBuffer(pPixPriv->buffer);
+        if (!pPixPriv->image) {
+            log(ERROR, "DRI3: AHARDWAREBUFFER_SOCKET_FD: failed to create EGLImage");
             goto fail;
         }
 
+        uint32_t texture = lorieGlamorTextureFromImage(pPixPriv->image);
+        if (!texture) {
+            log(ERROR, "DRI3: AHARDWAREBUFFER_SOCKET_FD: failed to create Texture from EGLImage");
+            lorieGlamorEGLDestroyImage(pPixPriv->image);
+            goto fail;
+        }
+
+        AHardwareBuffer_describe(pPixPriv->buffer, &desc);
         pixmap->devPrivate.ptr = NULL;
         screen->ModifyPixmapHeader(pixmap, desc.width, desc.height, 0, 0, desc.stride * 4, NULL);
+
+        glamor_set_pixmap_type(pixmap, GLAMOR_TEXTURE_ONLY);
+        glamor_set_pixmap_texture(pixmap, texture);
+
+        dixSetPrivate(&pixmap->devPrivates, &lorieAHBPixPrivateKey, pPixPriv);
+
         return pixmap;
     }
 
@@ -559,6 +596,12 @@ static dri3_screen_info_rec dri3Info = {
 Bool lorieInitDri3(ScreenPtr pScreen) {
     LorieScrPrivPtr pScrPriv;
 
+    AHardwareBuffer_getNativeHandle = dlsym(RTLD_DEFAULT, "AHardwareBuffer_getNativeHandle");
+    if (!AHardwareBuffer_getNativeHandle) {
+        FatalError("lorieInitDri3 failed: %s\n", dlerror());
+        return FALSE;
+    }
+
     if (!dixRegisterPrivateKey(&lorieScrPrivateKey, PRIVATE_SCREEN, 0))
         return FALSE;
 
@@ -575,7 +618,6 @@ Bool lorieInitDri3(ScreenPtr pScreen) {
     if (!pScrPriv)
         return FALSE;
 
-    wrap(pScrPriv, pScreen, CreateGC, lorieCreateGC)
     wrap(pScrPriv, pScreen, DestroyPixmap, lorieDestroyPixmap)
 
     dixSetPrivate(&pScreen->devPrivates, &lorieScrPrivateKey, pScrPriv);
