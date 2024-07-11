@@ -48,6 +48,7 @@ from The Open Group.
 #include <X11/Xos.h>
 #include <android/log.h>
 #include <android/native_window.h>
+#include <android/native_window_jni.h>
 #include <android/hardware_buffer.h>
 #include <sys/wait.h>
 #include <selection.h>
@@ -75,7 +76,8 @@ from The Open Group.
 #include "glxutil.h"
 #include "fbconfigs.h"
 
-#include "renderer.h"
+#include "glamor.h"
+#include "lorie_glamor_egl.h"
 #include "inpututils.h"
 #include "lorie.h"
 
@@ -93,7 +95,6 @@ typedef struct {
 
     DamagePtr damage;
     OsTimerPtr redrawTimer;
-    OsTimerPtr fpsTimer;
 
     Bool cursorMoved;
     int timerFd;
@@ -101,8 +102,6 @@ typedef struct {
     struct {
         AHardwareBuffer* buffer;
         Bool locked;
-        Bool legacyDrawing;
-        uint8_t flip;
         uint32_t width, height;
     } root;
 
@@ -119,6 +118,9 @@ static char *xstartup = NULL;
 static Bool TrueNoop() { return TRUE; }
 static Bool FalseNoop() { return FALSE; }
 static void VoidNoop() {}
+
+static jmethodID Surface_release = NULL;
+static jmethodID Surface_destroy = NULL;
 
 void
 ddxGiveUp(unused enum ExitCode error) {
@@ -203,9 +205,6 @@ ddxInputThreadInit(void) {}
 
 void ddxUseMsg(void) {
     ErrorF("-xstartup \"command\"    start `command` after server startup\n");
-    ErrorF("-legacy-drawing        use legacy drawing, without using AHardwareBuffers\n");
-    ErrorF("-force-bgra            force flipping colours (RGBA->BGRA)\n");
-    ErrorF("-disable-dri3          disabling DRI3 support (to let lavapipe work)\n");
 }
 
 int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
@@ -213,21 +212,6 @@ int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
         CHECK_FOR_REQUIRED_ARGUMENTS(1);
         xstartup = argv[++i];
         return 2;
-    }
-
-    if (strcmp(argv[i], "-legacy-drawing") == 0) {
-        pvfb->root.legacyDrawing = TRUE;
-        return 1;
-    }
-
-    if (strcmp(argv[i], "-force-bgra") == 0) {
-        pvfb->root.flip = TRUE;
-        return 1;
-    }
-
-    if (strcmp(argv[i], "-disable-dri3") == 0) {
-        pvfb->dri3 = FALSE;
-        return 1;
     }
 
     return 0;
@@ -260,7 +244,7 @@ static RRModePtr lorieCvt(int width, int height, int framerate) {
 }
 
 static void lorieMoveCursor(unused DeviceIntPtr pDev, unused ScreenPtr pScr, int x, int y) {
-    renderer_set_cursor_coordinates(x, y);
+    lorieGlamorSetCursorCoordinates(x, y);
     pvfb->cursorMoved = TRUE;
 }
 
@@ -297,9 +281,9 @@ static void lorieSetCursor(unused DeviceIntPtr pDev, unused ScreenPtr pScr, Curs
         CARD32 data[bits->width * bits->height * 4];
 
         lorieConvertCursor(pCurs, data);
-        renderer_update_cursor(bits->width, bits->height, bits->xhot, bits->yhot, data);
+        lorieGlamorUpdateCursor(bits->width, bits->height, bits->xhot, bits->yhot, data);
     } else
-        renderer_update_cursor(0, 0, 0, 0, NULL);
+        lorieGlamorUpdateCursor(0, 0, 0, 0, NULL);
 
     if (x0 >= 0 && y0 >= 0)
         lorieMoveCursor(NULL, NULL, x0, y0);
@@ -320,158 +304,43 @@ static miPointerScreenFuncRec loriePointerCursorFuncs = {
     .WarpCursor = miPointerWarpCursor
 };
 
-static void lorieUpdateBuffer(void) {
-    AHardwareBuffer_Desc d0 = {}, d1 = {};
-    AHardwareBuffer *new = NULL, *old = pvfb->root.buffer;
-    int status, wasLocked = pvfb->root.locked;
-    void *data0 = NULL, *data1 = NULL;
-
-    if (pvfb->root.legacyDrawing) {
-        PixmapPtr pixmap = (PixmapPtr) pScreenPtr->devPrivate;
-        DrawablePtr draw = &pixmap->drawable;
-        data0 = malloc(pScreenPtr->width * pScreenPtr->height * 4);
-        data1 = (draw->width && draw->height) ? pixmap->devPrivate.ptr : NULL;
-        if (data1)
-            pixman_blt(data1, data0, draw->width, pScreenPtr->width, 32, 32, 0, 0, 0, 0,
-                       min(draw->width, pScreenPtr->width), min(draw->height, pScreenPtr->height));
-        pScreenPtr->ModifyPixmapHeader(pScreenPtr->devPrivate, pScreenPtr->width, pScreenPtr->height, 32, 32, pScreenPtr->width * 4, data0);
-        free(data1);
-        return;
-    }
-
-    if (pScreenPtr->devPrivate) {
-        d0.width = pScreenPtr->width;
-        d0.height = pScreenPtr->height;
-        d0.layers = 1;
-        d0.usage = USAGE | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
-        d0.format = pvfb->root.flip
-                ? AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM
-                : AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM;
-
-        /* I could use this, but in this case I must swap colours in the shader. */
-        // desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM;
-
-        status = AHardwareBuffer_allocate(&d0, &new);
-        if (status != 0)
-            FatalError("Failed to allocate root window pixmap (error %d)", status);
-
-        AHardwareBuffer_describe(new, &d0);
-        status = AHardwareBuffer_lock(new, USAGE, -1, NULL, &data0);
-        if (status != 0)
-            FatalError("Failed to lock root window pixmap (error %d)", status);
-
-        pvfb->root.buffer = new;
-        pvfb->root.locked = TRUE;
-
-        pScreenPtr->ModifyPixmapHeader(pScreenPtr->devPrivate, d0.width, d0.height, 32, 32, d0.stride * 4, data0);
-
-        renderer_set_buffer(pvfb->env, new);
-    }
-
-    if (old) {
-        if (wasLocked)
-            AHardwareBuffer_unlock(old, NULL);
-
-        if (new && pvfb->root.locked) {
-            /*
-             * It is pretty easy. If there is old pixmap we should copy it's contents to new pixmap.
-             * If it is impossible we should simply request root window exposure.
-             */
-            AHardwareBuffer_describe(old, &d1);
-            status = AHardwareBuffer_lock(old, USAGE, -1, NULL, &data1);
-            if (status == 0) {
-                pixman_blt(data1, data0, d1.stride, d0.stride,
-                           32, 32, 0, 0, 0, 0,
-                           min(d1.width, d0.width), min(d1.height, d0.height));
-                AHardwareBuffer_unlock(old, NULL);
-            } else {
-                RegionRec reg;
-                BoxRec box = {.x1 = 0, .y1 = 0, .x2 = d0.width, .y2 = d0.height};
-                RegionInit(&reg, &box, 1);
-                pScreenPtr->WindowExposures(pScreenPtr->root, &reg);
-                RegionUninit(&reg);
-                AHardwareBuffer_release(old);
-                return;
-            }
-        }
-        AHardwareBuffer_release(old);
-    }
-}
-
-static inline void loriePixmapUnlock(PixmapPtr pixmap) {
-    if (pvfb->root.legacyDrawing)
-        return renderer_update_root(pixmap->drawable.width, pixmap->drawable.height, pixmap->devPrivate.ptr, pvfb->root.flip);
-
-    if (pvfb->root.locked)
-        AHardwareBuffer_unlock(pvfb->root.buffer, NULL);
-
-    pvfb->root.locked = FALSE;
-    pixmap->drawable.pScreen->ModifyPixmapHeader(pixmap, -1, -1, -1, -1, -1, NULL);
-}
-
-static inline Bool loriePixmapLock(PixmapPtr pixmap) {
-    AHardwareBuffer_Desc desc = {};
-    void *data;
-    int status;
-
-    if (pvfb->root.legacyDrawing)
-        return TRUE;
-
-    if (!pvfb->root.buffer) {
-        pvfb->root.locked = FALSE;
-        return FALSE;
-    }
-
-    AHardwareBuffer_describe(pvfb->root.buffer, &desc);
-    status = AHardwareBuffer_lock(pvfb->root.buffer, USAGE, -1, NULL, &data);
-    pvfb->root.locked = status == 0;
-    if (pvfb->root.locked)
-        pixmap->drawable.pScreen->ModifyPixmapHeader(pixmap, desc.width, desc.height, -1, -1, desc.stride * 4, data);
-    else
-        FatalError("Failed to lock surface: %d\n", status);
-
-    return pvfb->root.locked;
-}
-
 static void lorieTimerCallback(int fd, unused int r, void *arg) {
     char dummy[8];
     read(fd, dummy, 8);
-    if (renderer_should_redraw() && RegionNotEmpty(DamageRegion(pvfb->damage))) {
-        int redrawn = FALSE;
-        ScreenPtr pScreen = (ScreenPtr) arg;
 
-        loriePixmapUnlock(pScreen->GetScreenPixmap(pScreen));
-        redrawn = renderer_redraw(pvfb->env, pvfb->root.flip);
-        if (loriePixmapLock(pScreen->GetScreenPixmap(pScreen)) && redrawn)
-            DamageEmpty(pvfb->damage);
-    } else if (pvfb->cursorMoved)
-        renderer_redraw(pvfb->env, pvfb->root.flip);
+    RegionPtr pRegion = DamageRegion(pvfb->damage);
+    bool redisplay = RegionNotEmpty(pRegion);
+
+    if (pvfb->cursorMoved || redisplay)
+        lorieGlamorDamageReDisplay(pRegion);
+
+    if (redisplay)
+        DamageEmpty(pvfb->damage);
 
     pvfb->cursorMoved = FALSE;
 }
 
-static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unused void *arg) {
-    renderer_print_fps(5000);
-    return 5000;
-}
-
 static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
-    Bool ret;
-    pScreen->CreateScreenResources = pvfb->CreateScreenResources;
+    unwrap(pvfb, pScreen, CreateScreenResources);
+    Bool ret = pScreen->CreateScreenResources(pScreen);
+    wrap(pvfb, pScreen, CreateScreenResources, lorieCreateScreenResources)
 
-    ret = pScreen->CreateScreenResources(pScreen);
     if (!ret)
         return FALSE;
 
-    pScreen->devPrivate = fbCreatePixmap(pScreen, 0, 0, pScreen->rootDepth, CREATE_PIXMAP_USAGE_BACKING_PIXMAP);
+    PixmapPtr pPixmap = pScreen->CreatePixmap(pScreen, pvfb->root.width, pvfb->root.height, pScreen->rootDepth, CREATE_PIXMAP_USAGE_BACKING_PIXMAP);
+    if (!pPixmap)
+        return FALSE;
+
+    pScreen->SetScreenPixmap(pPixmap);
+
+    lorieGlamorSetTexture(glamor_get_pixmap_texture(pPixmap));
 
     pvfb->damage = DamageCreate(NULL, NULL, DamageReportNone, TRUE, pScreen, NULL);
     if (!pvfb->damage)
         FatalError("Couldn't setup damage\n");
 
-    DamageRegister(&(*pScreen->GetScreenPixmap)(pScreen)->drawable, pvfb->damage);
-    pvfb->fpsTimer = TimerSet(NULL, 0, 5000, lorieFramecounter, pScreen);
-    lorieUpdateBuffer();
+    DamageRegister(&pPixmap->drawable, pvfb->damage);
 
     return TRUE;
 }
@@ -483,6 +352,18 @@ lorieCloseScreen(ScreenPtr pScreen) {
     return pScreen->CloseScreen(pScreen);
 }
 
+static int
+lorieSetPixmapVisitWindow(WindowPtr window, void *data)
+{
+    ScreenPtr screen = window->drawable.pScreen;
+
+    if (screen->GetWindowPixmap(window) == data) {
+        screen->SetWindowPixmap(window, screen->GetScreenPixmap(screen));
+        return WT_WALKCHILDREN;
+    }
+    return WT_DONTWALKCHILDREN;
+}
+
 static Bool
 lorieRRScreenSetSize(ScreenPtr pScreen, CARD16 width, CARD16 height, unused CARD32 mmWidth, unused CARD32 mmHeight) {
     SetRootClip(pScreen, ROOT_CLIP_NONE);
@@ -491,9 +372,32 @@ lorieRRScreenSetSize(ScreenPtr pScreen, CARD16 width, CARD16 height, unused CARD
     pvfb->root.height = pScreen->height = height;
     pScreen->mmWidth = ((double) (width)) * 25.4 / monitorResolution;
     pScreen->mmHeight = ((double) (height)) * 25.4 / monitorResolution;
-    lorieUpdateBuffer();
+
+    if (pvfb->damage) {
+        DamageDestroy(pvfb->damage);
+        pvfb->damage = NULL;
+    }
+
+    PixmapPtr old_screen_pixmap = pScreen->GetScreenPixmap(pScreen);
+    pScreen->DestroyPixmap(old_screen_pixmap);
+
+    PixmapPtr screen_pixmap = pScreen->CreatePixmap(pScreen, pScreen->width, pScreen->height, pScreen->rootDepth, CREATE_PIXMAP_USAGE_BACKING_PIXMAP);
+    if (!screen_pixmap)
+        return FALSE;
+
+    pScreen->SetScreenPixmap(screen_pixmap);
+
+    if (pScreen->root && pScreen->SetWindowPixmap)
+        TraverseTree(pScreen->root, lorieSetPixmapVisitWindow, old_screen_pixmap);
+
+    lorieGlamorSetTexture(glamor_get_pixmap_texture(screen_pixmap));
 
     pScreen->ResizeWindow(pScreen->root, 0, 0, width, height, NULL);
+    pvfb->damage = DamageCreate(NULL, NULL, DamageReportNone, TRUE, pScreen, NULL);
+    if (!pvfb->damage)
+        FatalError("Couldn't setup damage\n");
+
+    DamageRegister(&screen_pixmap->drawable, pvfb->damage);
     DamageEmpty(pvfb->damage);
     SetRootClip(pScreen, ROOT_CLIP_FULL);
 
@@ -575,12 +479,15 @@ lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **argv) {
     pScreen->blackPixel = 0;
     pScreen->whitePixel = 1;
 
+    ShmRegisterFbFuncs(pScreen);
+
     if (FALSE
           || !miSetVisualTypesAndMasks(24, ((1 << TrueColor) | (1 << DirectColor)), 8, TrueColor, 0xFF0000, 0x00FF00, 0x0000FF)
           || !miSetPixmapDepths()
           || !fbScreenInit(pScreen, NULL, pvfb->root.width, pvfb->root.height, monitorResolution, monitorResolution, 0, 32)
-          || !(!pvfb->dri3 || lorieInitDri3(pScreen))
           || !fbPictureInit(pScreen, 0, 0)
+          || !glamor_init(pScreen, GLAMOR_USE_EGL_SCREEN)
+          || !(!pvfb->dri3 || lorieInitDri3(pScreen))
           || !lorieRandRInit(pScreen)
           || !miPointerInitialize(pScreen, &loriePointerSpriteFuncs, &loriePointerCursorFuncs, TRUE)
           || !fbCreateDefColormap(pScreen))
@@ -590,7 +497,6 @@ lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **argv) {
     wrap(pvfb, pScreen, CloseScreen, lorieCloseScreen)
 
     QueueWorkProc(resetRootCursor, NULL, NULL);
-    ShmRegisterFbFuncs(pScreen);
 
     return TRUE;
 }                               /* end lorieScreenInit */
@@ -621,14 +527,37 @@ Bool lorieChangeScreenName(unused ClientPtr pClient, void *closure) {
 }
 
 Bool lorieChangeWindow(unused ClientPtr pClient, void *closure) {
-    jobject surface = (jobject) closure;
-    renderer_set_window(pvfb->env, surface, pvfb->root.buffer);
-    lorieSetCursor(NULL, NULL, CursorForDevice(GetMaster(lorieMouse, MASTER_POINTER)), -1, -1);
+    static jobject old_surface;
+    jobject new_surface = (jobject) closure;
 
-    if (pvfb->root.legacyDrawing) {
-        renderer_update_root(pScreenPtr->width, pScreenPtr->height, ((PixmapPtr) pScreenPtr->devPrivate)->devPrivate.ptr, pvfb->root.flip);
-        renderer_redraw(pvfb->env, pvfb->root.flip);
+    if (new_surface && old_surface && new_surface != old_surface && (*pvfb->env)->IsSameObject(pvfb->env, new_surface, old_surface)) {
+        (*pvfb->env)->DeleteGlobalRef(pvfb->env, new_surface);
+        return TRUE;
     }
+
+    lorieGlamorSetWindow(NULL);
+
+    if (old_surface) {
+        (*pvfb->env)->CallVoidMethod(pvfb->env, old_surface, Surface_release);
+        (*pvfb->env)->CallVoidMethod(pvfb->env, old_surface, Surface_destroy);
+        (*pvfb->env)->DeleteGlobalRef(pvfb->env, old_surface);
+        (old_surface = NULL);
+    }
+
+    ANativeWindow *window = ANativeWindow_fromSurface(pvfb->env, new_surface);
+    if (!window || !lorieGlamorSetWindow(window)) {
+        if (window)
+            ANativeWindow_release(window);
+
+        (*pvfb->env)->CallVoidMethod(pvfb->env, new_surface, Surface_release);
+        (*pvfb->env)->CallVoidMethod(pvfb->env, new_surface, Surface_destroy);
+        (*pvfb->env)->DeleteGlobalRef(pvfb->env, new_surface);
+        return TRUE;
+    }
+
+    old_surface = new_surface;
+
+    lorieSetCursor(NULL, NULL, CursorForDevice(GetMaster(lorieMouse, MASTER_POINTER)), -1, -1);
 
     return TRUE;
 }
@@ -679,8 +608,20 @@ InitOutput(ScreenInfo * screen_info, int argc, char **argv) {
     screen_info->bitmapBitOrder = BITMAP_BIT_ORDER;
     screen_info->numPixmapFormats = ARRAY_SIZE(depths);
 
-    renderer_init(pvfb->env, &pvfb->root.legacyDrawing, &pvfb->root.flip);
+    jclass Surface = (*pvfb->env)->FindClass(pvfb->env, "android/view/Surface");
+    Surface_release = (*pvfb->env)->GetMethodID(pvfb->env, Surface, "release", "()V");
+    Surface_destroy = (*pvfb->env)->GetMethodID(pvfb->env, Surface, "destroy", "()V");
+    if (!Surface_release) {
+        ErrorF("Failed to find required Surface.release method. Aborting.\n");
+        abort();
+    }
+    if (!Surface_destroy) {
+        ErrorF("Failed to find required Surface.destroy method. Aborting.\n");
+        abort();
+    }
+
     xorgGlxCreateVendor();
+    lorieGlamorInit();
     lorieInitClipboard();
 
     if (-1 == AddScreen(lorieScreenInit, argc, argv)) {
