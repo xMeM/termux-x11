@@ -3,6 +3,7 @@
 #include <gcstruct.h>
 #include <privates.h>
 #include <scrnintstr.h>
+#include <dlfcn.h>
 #include <dri3.h>
 #include <sys/mman.h>
 #include <fb.h>
@@ -563,6 +564,101 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
     return NULL;
 }
 
+typedef struct native_handle {
+    int version; /* sizeof(native_handle_t) */
+    int numFds;  /* number of file-descriptors at &data[0] */
+    int numInts; /* number of ints at &data[numFds] */
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wzero-length-array"
+#endif
+    int data[0]; /* numFds + numInts ints */
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+} native_handle_t;
+
+const native_handle_t *(*AHardwareBuffer_getNativeHandle)(const AHardwareBuffer *buffer);
+
+static int
+lorieFdsFromPixmap(ScreenPtr screen, PixmapPtr pixmap, int *fds,
+                   uint32_t *strides, uint32_t *offsets,
+                   uint64_t *modifier) {
+    LorieAHBPixPrivPtr pPixPriv = dixLookupPrivate(&pixmap->devPrivates, &lorieAHBPixPrivateKey);
+    lorieScrPriv(screen);
+    const native_handle_t *nativeHandle = NULL;
+
+    if (!pScrPriv->glamor)
+        goto fail;
+
+    if (pPixPriv) {
+        nativeHandle = AHardwareBuffer_getNativeHandle(pPixPriv->buffer);
+    } else {
+        pPixPriv = calloc(1, sizeof(*pPixPriv));
+        if (!pPixPriv)
+            goto fail;
+
+        AHardwareBuffer_Desc desc = {
+            .width = pixmap->drawable.width,
+            .height = pixmap->drawable.height,
+            .format = AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM,
+            .layers = 1,
+            .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
+                AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
+                AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
+                AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
+        };
+        if (AHardwareBuffer_allocate(&desc, &pPixPriv->buffer)) {
+            free(pPixPriv);
+            goto fail;
+        }
+
+        pPixPriv->image = renderer_image_from_buffer(pPixPriv->buffer);
+        if (!pPixPriv->image) {
+            AHardwareBuffer_release(pPixPriv->buffer);
+            free(pPixPriv);
+            goto fail;
+        }
+
+        uint32_t texture = renderer_texture_from_image(pPixPriv->image);
+        if (!texture) {
+            renderer_destroy_image(pPixPriv->image);
+            AHardwareBuffer_release(pPixPriv->buffer);
+            free(pPixPriv);
+            goto fail;
+        }
+
+        AHardwareBuffer_describe(pPixPriv->buffer, &desc);
+        screen->ModifyPixmapHeader(pixmap, desc.width, desc.height, 0, 0, desc.stride * 4, NULL);
+
+        glamor_set_pixmap_type(pixmap, GLAMOR_TEXTURE_ONLY);
+        glamor_set_pixmap_texture(pixmap, texture);
+
+        dixSetPrivate(&pixmap->devPrivates, &lorieAHBPixPrivateKey, pPixPriv);
+
+        nativeHandle = AHardwareBuffer_getNativeHandle(pPixPriv->buffer);
+    }
+
+    if (nativeHandle) {
+        for (int i = 0; i < nativeHandle->numFds; i++) {
+            if (lseek(nativeHandle->data[i], 0, SEEK_END) < pixmap->devKind * pixmap->drawable.height)
+                continue;
+
+            fds[0] = dup(nativeHandle->data[i]);
+            if (fds[0] < 0)
+                goto fail;
+
+            strides[0] = pixmap->devKind;
+            offsets[0] = 0;
+            *modifier = 0; /* DRM_FORMAT_MOD_LINEAR */;
+            return 1;
+        }
+    }
+
+fail:
+    return 0;
+}
+
 static int lorieGetFormats(__unused ScreenPtr screen, CARD32 *num_formats, CARD32 **formats) {
     *num_formats = 0;
     *formats = NULL;
@@ -577,7 +673,7 @@ static int lorieGetModifiers(__unused ScreenPtr screen, __unused uint32_t format
 
 static dri3_screen_info_rec dri3Info = {
     .version = 2,
-    .fds_from_pixmap = FalseNoop,
+    .fds_from_pixmap = lorieFdsFromPixmap,
     .pixmap_from_fds = loriePixmapFromFds,
     .get_formats = lorieGetFormats,
     .get_modifiers = lorieGetModifiers,
@@ -586,6 +682,15 @@ static dri3_screen_info_rec dri3Info = {
 
 Bool lorieInitDri3(ScreenPtr pScreen, Bool glamor) {
     LorieScrPrivPtr pScrPriv;
+
+    if (glamor) {
+        if (!AHardwareBuffer_getNativeHandle) {
+            AHardwareBuffer_getNativeHandle = dlsym(RTLD_DEFAULT, "AHardwareBuffer_getNativeHandle");
+        }
+        if (!AHardwareBuffer_getNativeHandle) {
+            FatalError("lorieInitDri3 failed %s\n", dlerror());
+        }
+    }
 
     if (!dixRegisterPrivateKey(&lorieScrPrivateKey, PRIVATE_SCREEN, 0))
         return FALSE;
