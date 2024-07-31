@@ -628,7 +628,7 @@ lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **argv) {
           || !fbScreenInit(pScreen, NULL, pvfb->root.width, pvfb->root.height, monitorResolution, monitorResolution, 0, 32)
           || !fbPictureInit(pScreen, 0, 0)
           || !(!pvfb->root.glamor || glamor_init(pScreen, GLAMOR_USE_EGL_SCREEN))
-          || !(!pvfb->dri3 || lorieInitDri3(pScreen))
+          || !(!pvfb->dri3 || lorieInitDri3(pScreen, pvfb->root.glamor))
           || !lorieRandRInit(pScreen)
           || !miPointerInitialize(pScreen, &loriePointerSpriteFuncs, &loriePointerCursorFuncs, TRUE)
           || !fbCreateDefColormap(pScreen))
