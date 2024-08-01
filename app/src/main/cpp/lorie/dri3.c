@@ -12,6 +12,7 @@
 #include "screenint.h"
 #include "lorie.h"
 #include "renderer.h"
+#include "glamor.h"
 
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
 
@@ -59,10 +60,13 @@ typedef struct {
 typedef struct {
     CreateGCProcPtr CreateGC;
     DestroyPixmapProcPtr DestroyPixmap;
+
+    Bool use_glamor;
 } LorieScrPrivRec, *LorieScrPrivPtr;
 
 typedef struct {
     AHardwareBuffer* buffer;
+    void *image;
 } LorieAHBPixPrivRec, *LorieAHBPixPrivPtr;
 
 static Bool FalseNoop() { return FALSE; }
@@ -422,8 +426,12 @@ lorieDestroyPixmap(PixmapPtr pPixmap) {
         munmap(ptr, size);
 
     if (pPixPriv) {
-        if (pPixPriv->buffer)
+        if (pPixPriv->image) {
+            renderer_destroy_image(pPixPriv->image);
+        }
+        if (pPixPriv->buffer) {
             AHardwareBuffer_release(pPixPriv->buffer);
+        }
         free(pPixPriv);
     }
 
@@ -436,6 +444,7 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
     const CARD64 RAW_MMAPPABLE_FD = 1274;
     PixmapPtr pixmap = NullPixmap;
     LorieAHBPixPrivPtr pPixPriv = NULL;
+    lorieScrPriv(screen);
     if (num_fds > 1) {
         log(ERROR, "DRI3: More than 1 fd");
         return NULL;
@@ -519,6 +528,25 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
 
         pixmap->devPrivate.ptr = NULL;
         screen->ModifyPixmapHeader(pixmap, desc.width, desc.height, 0, 0, desc.stride * 4, NULL);
+
+        if (pScrPriv->use_glamor) {
+            pPixPriv->image = renderer_image_from_buffer(pPixPriv->buffer);
+            if (!pPixPriv->image) {
+                log(ERROR, "DRI3: AHARDWAREBUFFER_SOCKET_FD: failed to create EGLImage");
+                goto fail;
+            }
+
+            uint32_t texture = renderer_texture_from_image(pPixPriv->image);
+            if (!texture) {
+                log(ERROR, "DRI3: AHARDWAREBUFFER_SOCKET_FD: failed to create Texture from EGLImage");
+                renderer_destroy_image(pPixPriv->image);
+                goto fail;
+            }
+
+            glamor_set_pixmap_type(pixmap, GLAMOR_TEXTURE_ONLY);
+            glamor_set_pixmap_texture(pixmap, texture);
+        }
+
         return pixmap;
     }
 
@@ -556,7 +584,7 @@ static dri3_screen_info_rec dri3Info = {
     .get_drawable_modifiers = FalseNoop
 };
 
-Bool lorieInitDri3(ScreenPtr pScreen) {
+Bool lorieInitDri3(ScreenPtr pScreen, Bool use_glamor) {
     LorieScrPrivPtr pScrPriv;
 
     if (!dixRegisterPrivateKey(&lorieScrPrivateKey, PRIVATE_SCREEN, 0))
@@ -575,7 +603,11 @@ Bool lorieInitDri3(ScreenPtr pScreen) {
     if (!pScrPriv)
         return FALSE;
 
-    wrap(pScrPriv, pScreen, CreateGC, lorieCreateGC)
+    pScrPriv->use_glamor = use_glamor;
+
+    if (!use_glamor) {
+        wrap(pScrPriv, pScreen, CreateGC, lorieCreateGC);
+    }
     wrap(pScrPriv, pScreen, DestroyPixmap, lorieDestroyPixmap)
 
     dixSetPrivate(&pScreen->devPrivates, &lorieScrPrivateKey, pScrPriv);

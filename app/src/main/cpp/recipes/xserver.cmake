@@ -25,17 +25,13 @@ file(GENERATE
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/xserver")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/xserver/GL")
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/xserver/GL/gl.h" CONTENT "#include <epoxy/gl.h>")
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/xserver/GL/glext.h" CONTENT "#include <GL/gl.h>")
-add_custom_command(
-        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/xserver/GL/gl.h"
-        COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/libepoxy/src/gen_dispatch.py"
-        "--outputdir=${CMAKE_CURRENT_BINARY_DIR}/xserver/GL" "${CMAKE_CURRENT_SOURCE_DIR}/libepoxy/registry/gl.xml"
-        COMMENT "Generating source code (GL/gl.h)"
-        VERBATIM)
 
 set(inc "${CMAKE_CURRENT_BINARY_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/xserver"
         "libxfont/include"
+        "libepoxy/include"
         "pixman/pixman"
         "xorgproto/include"
         "libxkbfile/include"
@@ -55,6 +51,7 @@ set(inc "${CMAKE_CURRENT_BINARY_DIR}"
         "xserver/randr"
         "xserver/render"
         "xserver/xfixes"
+        "xserver/glamor"
         "xserver/glx")
 
 set(compile_options
@@ -73,6 +70,13 @@ set(compile_options
 if (SIZEOF_UNSIGNED_LONG EQUAL 8)
     set(compile_options ${compile_options} "-D_XSERVER64=1")
 endif ()
+
+set(GLAMOR_SOURCES glamor.c glamor_glyphblt.c glamor_spans.c glamor_addtraps.c glamor_gradient.c glamor_sync.c glamor_composite_glyphs.c glamor_image.c glamor_text.c glamor_compositerects.c glamor_largepixmap.c glamor_transfer.c glamor_copy.c glamor_lines.c glamor_transform.c glamor_core.c glamor_picture.c glamor_trapezoid.c glamor_dash.c glamor_pixmap.c glamor_triangles.c glamor_points.c glamor_utils.c glamor_prepare.c glamor_vbo.c glamor_program.c glamor_window.c glamor_fbo.c glamor_rects.c glamor_font.c glamor_render.c glamor_segs.c)
+list(TRANSFORM GLAMOR_SOURCES PREPEND "xserver/glamor/")
+add_library(xserver_glamor STATIC ${GLAMOR_SOURCES})
+target_include_directories(xserver_glamor PRIVATE ${inc})
+target_link_libraries(xserver_glamor PRIVATE epoxy)
+target_compile_options(xserver_glamor PRIVATE ${compile_options})
 
 set(DIX_SOURCES
         atom.c colormap.c cursor.c devices.c dispatch.c dixfonts.c main.c dixutils.c enterleave.c
@@ -245,6 +249,7 @@ set(GLX_SOURCES
 list(TRANSFORM GLX_SOURCES PREPEND "xserver/glx/")
 add_library(xserver_glx STATIC ${GLX_SOURCES} "${CMAKE_CURRENT_BINARY_DIR}/xserver/GL/gl.h")
 target_include_directories(xserver_glx PRIVATE ${inc})
+target_link_libraries(xserver_glx PRIVATE epoxy)
 target_compile_options(xserver_glx PRIVATE ${compile_options})
 
 set(GLXVND_SOURCES
@@ -255,7 +260,7 @@ target_include_directories(xserver_glxvnd PRIVATE ${inc})
 target_compile_options(xserver_glxvnd PRIVATE ${compile_options})
 
 set(XSERVER_LIBS tirpc Xdmcp Xau pixman Xfont2 fontenc GLESv2 xshmfence xkbcomp)
-foreach (part glx glxvnd fb mi dix composite damageext dbe randr miext_damage render present xext
+foreach (part glamor glx glxvnd fb mi dix composite damageext dbe randr miext_damage render present xext
          dri3 miext_sync xfixes xi xkb record xi_stubs xkb_stubs os)
     set(XSERVER_LIBS ${XSERVER_LIBS} xserver_${part})
 endforeach ()
@@ -277,4 +282,3 @@ target_link_options(Xlorie PRIVATE "-Wl,--as-needed" "-Wl,--no-undefined" "-fvis
 target_link_libraries(Xlorie "-Wl,--whole-archive" ${XSERVER_LIBS} "-Wl,--no-whole-archive" android log m z EGL GLESv2)
 target_compile_options(Xlorie PRIVATE ${compile_options})
 target_apply_patch(Xlorie "${CMAKE_CURRENT_SOURCE_DIR}/xserver" "${CMAKE_CURRENT_SOURCE_DIR}/patches/xserver.patch")
-target_apply_patch(Xlorie "${CMAKE_CURRENT_SOURCE_DIR}/libepoxy" "${CMAKE_CURRENT_SOURCE_DIR}/patches/libepoxy.patch")
