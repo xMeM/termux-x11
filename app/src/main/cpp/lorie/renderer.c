@@ -6,18 +6,17 @@
 #pragma ide diagnostic ignored "UnreachableCode"
 #pragma ide diagnostic ignored "OCUnusedMacroInspection"
 #pragma ide diagnostic ignored "misc-no-recursion"
-#define EGL_EGLEXT_PROTOTYPES
-#define GL_GLEXT_PROTOTYPES
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
 #include <android/native_window_jni.h>
 #include <android/log.h>
 #include <dlfcn.h>
 #include "renderer.h"
 #include "os.h"
+
+#include "epoxy/gl.h"
+#include "epoxy/egl.h"
+#include "glamor_egl.h"
+#include "glamor_priv.h"
 
 #define log(...) __android_log_print(ANDROID_LOG_DEBUG, "gles-renderer", __VA_ARGS__)
 #define loge(...) __android_log_print(ANDROID_LOG_ERROR, "gles-renderer", __VA_ARGS__)
@@ -140,16 +139,21 @@ static jmethodID Surface_destroy = NULL;
 static struct {
     GLuint id;
     float width, height;
-} display;
+} _display;
 static struct {
     GLuint id;
     float x, y, width, height, xhot, yhot;
 } cursor;
 
+GLuint vao = 0, vbo = 0;
 GLuint g_texture_program = 0, gv_pos = 0, gv_coords = 0;
 GLuint g_texture_program_bgra = 0, gv_pos_bgra = 0, gv_coords_bgra = 0;
 
-int renderer_init(JNIEnv* env, int* legacy_drawing, uint8_t* flip) {
+static epoxy_resolver_stub_t resolver_failure_handler(const char *name) {
+    return eglGetProcAddress(name);
+}
+
+int renderer_init(JNIEnv* env, int* legacy_drawing, uint8_t* flip, int* glamor) {
     EGLint major, minor;
     EGLint numConfigs;
     const EGLint configAttribs[] = {
@@ -188,6 +192,8 @@ int renderer_init(JNIEnv* env, int* legacy_drawing, uint8_t* flip) {
         loge("Failed to find required Surface.destroy method. Aborting.\n");
         abort();
     }
+
+    epoxy_set_resolver_failure_handler(resolver_failure_handler);
 
     egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (egl_display == EGL_NO_DISPLAY) {
@@ -344,6 +350,14 @@ int renderer_init(JNIEnv* env, int* legacy_drawing, uint8_t* flip) {
         }
     }
 
+    if (*glamor && (*legacy_drawing || *flip)) {
+        *glamor = FALSE;
+    }
+
+    if (*glamor && epoxy_egl_version(egl_display) < 15 &&
+        !epoxy_has_egl_extension(egl_display, "EGL_KHR_surfaceless_context")) {
+        *glamor = FALSE;
+    }
     return 1;
 }
 
@@ -377,7 +391,7 @@ void renderer_set_buffer(JNIEnv* env, AHardwareBuffer* buf) {
 
     buffer = buf;
 
-    glBindTexture(GL_TEXTURE_2D, display.id); checkGlError();
+    glBindTexture(GL_TEXTURE_2D, _display.id); checkGlError();
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); checkGlError();
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); checkGlError();
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); checkGlError();
@@ -386,8 +400,8 @@ void renderer_set_buffer(JNIEnv* env, AHardwareBuffer* buf) {
         AHardwareBuffer_acquire(buffer);
         AHardwareBuffer_describe(buffer, &desc);
 
-        display.width = (float) desc.width;
-        display.height = (float) desc.height;
+        _display.width = (float) desc.width;
+        _display.height = (float) desc.height;
 
         clientBuffer = eglGetNativeClientBufferANDROID(buffer);
         if (!clientBuffer) {
@@ -404,16 +418,16 @@ void renderer_set_buffer(JNIEnv* env, AHardwareBuffer* buf) {
                 loge("Binding AHardwareBuffer to an EGLImage failed.");
             }
 
-            display.width = 1;
-            display.height = 1;
+            _display.width = 1;
+            _display.height = 1;
             uint32_t data = {0};
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &data);
             checkGlError();
         }
         checkGlError();
     } else {
-        display.width = 1;
-        display.height = 1;
+        _display.width = 1;
+        _display.height = 1;
         uint32_t data = {0};
         loge("There is no AHardwareBuffer, nothing to be bound.");
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &data); checkGlError();
@@ -422,6 +436,12 @@ void renderer_set_buffer(JNIEnv* env, AHardwareBuffer* buf) {
     renderer_redraw(env, flip);
 
     log("renderer_set_buffer %p %d %d", buffer, desc.width, desc.height);
+}
+
+void renderer_set_texture(uint32_t tex, uint32_t width, uint32_t height) {
+    _display.width = width;
+    _display.height = height;
+    _display.id = tex;
 }
 
 void renderer_set_window(JNIEnv* env, jobject new_surface, AHardwareBuffer* new_buffer) {
@@ -514,8 +534,11 @@ void renderer_set_window(JNIEnv* env, jobject new_surface, AHardwareBuffer* new_
         gv_coords_bgra = (GLuint) glGetAttribLocation(g_texture_program_bgra, "texCoords"); checkGlError();
 
         glActiveTexture(GL_TEXTURE0); checkGlError();
-        glGenTextures(1, &display.id); checkGlError();
+        glGenTextures(1, &_display.id); checkGlError();
         glGenTextures(1, &cursor.id); checkGlError();
+
+        glGenVertexArrays(1, &vao); checkGlError();
+        glGenBuffers(1, &vbo); checkGlError();
     }
 
     eglSwapInterval(egl_display, 0);
@@ -535,18 +558,18 @@ void renderer_update_root(int w, int h, void* data, uint8_t flip) {
     if (eglGetCurrentContext() == EGL_NO_CONTEXT || !w || !h)
         return;
 
-    if (display.width != (float) w || display.height != (float) h) {
-        display.width = (float) w;
-        display.height = (float) h;
+    if (_display.width != (float) w || _display.height != (float) h) {
+        _display.width = (float) w;
+        _display.height = (float) h;
 
-        glBindTexture(GL_TEXTURE_2D, display.id); checkGlError();
+        glBindTexture(GL_TEXTURE_2D, _display.id); checkGlError();
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); checkGlError();
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); checkGlError();
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); checkGlError();
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); checkGlError();
         glTexImage2D(GL_TEXTURE_2D, 0, flip ? GL_RGBA : GL_BGRA_EXT, w, h, 0, flip ? GL_RGBA : GL_BGRA_EXT, GL_UNSIGNED_BYTE, data); checkGlError();
     } else {
-        glBindTexture(GL_TEXTURE_2D, display.id); checkGlError();
+        glBindTexture(GL_TEXTURE_2D, _display.id); checkGlError();
 
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, flip ? GL_RGBA : GL_BGRA_EXT, GL_UNSIGNED_BYTE, data);
         checkGlError();
@@ -560,7 +583,7 @@ void renderer_update_cursor(int w, int h, int xhot, int yhot, void* data) {
     cursor.xhot = (float) xhot;
     cursor.yhot = (float) yhot;
 
-    if (eglGetCurrentContext() == EGL_NO_CONTEXT || !cursor.width || !cursor.height)
+    if (!sfc || eglGetCurrentContext() == EGL_NO_CONTEXT || !cursor.width || !cursor.height)
         return;
 
     glBindTexture(GL_TEXTURE_2D, cursor.id); checkGlError();
@@ -588,11 +611,16 @@ int renderer_should_redraw(void) {
 
 int renderer_redraw(JNIEnv* env, uint8_t flip) {
     int err = EGL_SUCCESS;
+    int width = win ? ANativeWindow_getWidth(win) : -1;
+    int height = win ? ANativeWindow_getHeight(win) : -1;
 
-    if (!sfc || eglGetCurrentContext() == EGL_NO_CONTEXT)
+    if (!sfc || width < 0 || height < 0 ||
+        !eglMakeCurrent(egl_display, sfc, sfc, ctx))
         return FALSE;
 
-    draw(display.id,  -1.f, -1.f, 1.f, 1.f, flip);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0); checkGlError();
+    glViewport(0, 0, width, height); checkGlError();
+    draw(_display.id,  -1.f, -1.f, 1.f, 1.f, flip);
     draw_cursor();
     if (eglSwapBuffers(egl_display, sfc) != EGL_TRUE) {
         err = eglGetError();
@@ -683,17 +711,25 @@ static void draw(GLuint id, float x0, float y0, float x1, float y1, uint8_t flip
         x1, -y1, 0.f, 1.f, 1.f,
     };
 
+    GLint old_vao;
     GLuint p = flip ? gv_pos_bgra : gv_pos, c = flip ? gv_coords_bgra : gv_coords;
+
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &old_vao); checkGlError();
+    glBindVertexArray(vao); checkGlError();
+    glBindBuffer(GL_ARRAY_BUFFER, vbo); checkGlError();
+    glBufferData(GL_ARRAY_BUFFER, sizeof(coords), coords, GL_STATIC_DRAW); checkGlError();
 
     glActiveTexture(GL_TEXTURE0); checkGlError();
     glUseProgram(flip ? g_texture_program_bgra : g_texture_program); checkGlError();
     glBindTexture(GL_TEXTURE_2D, id); checkGlError();
 
-    glVertexAttribPointer(p, 3, GL_FLOAT, GL_FALSE, 20, coords); checkGlError();
-    glVertexAttribPointer(c, 2, GL_FLOAT, GL_FALSE, 20, &coords[3]); checkGlError();
+    glVertexAttribPointer(p, 3, GL_FLOAT, GL_FALSE, 20, (GLvoid *)0); checkGlError();
+    glVertexAttribPointer(c, 2, GL_FLOAT, GL_FALSE, 20, (GLvoid *)(sizeof(GLfloat) * 3)); checkGlError();
     glEnableVertexAttribArray(p); checkGlError();
     glEnableVertexAttribArray(c); checkGlError();
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4); checkGlError();
+
+    glBindVertexArray(old_vao); checkGlError();
 }
 
 __unused static void draw_cursor(void) {
@@ -702,13 +738,100 @@ __unused static void draw_cursor(void) {
     if (!cursor.width || !cursor.height)
         return;
 
-    x = 2.f * (cursor.x - cursor.xhot) / display.width - 1.f;
-    y = 2.f * (cursor.y - cursor.yhot) / display.height - 1.f;
-    w = 2.f * cursor.width / display.width;
-    h = 2.f * cursor.height / display.height;
+    x = 2.f * (cursor.x - cursor.xhot) / _display.width - 1.f;
+    y = 2.f * (cursor.y - cursor.yhot) / _display.height - 1.f;
+    w = 2.f * cursor.width / _display.width;
+    h = 2.f * cursor.height / _display.height;
     glEnable(GL_BLEND); checkGlError();
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); checkGlError();
     draw(cursor.id, x, y, x + w, y + h, false);
     glDisable(GL_BLEND); checkGlError();
 }
 
+static void glamor_egl_make_current(struct glamor_context *glamor_ctx) {
+   /* There's only a single global dispatch table in Mesa.  EGL, GLX,
+    * and AIGLX's direct dispatch table manipulation don't talk to
+    * each other.  We need to set the context to NULL first to avoid
+    * EGL's no-op context change fast path when switching back to
+    * EGL.
+    */
+   eglMakeCurrent(
+      glamor_ctx->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+
+   if (!eglMakeCurrent(glamor_ctx->display,
+                       EGL_NO_SURFACE,
+                       EGL_NO_SURFACE,
+                       glamor_ctx->ctx)) {
+      FatalError("Failed to make EGL context current\n");
+   }
+}
+
+void glamor_egl_screen_init(ScreenPtr screen,
+                            struct glamor_context *glamor_ctx) {
+   glamor_enable_dri3(screen);
+   glamor_ctx->display = egl_display;
+   glamor_ctx->ctx = ctx;
+   glamor_ctx->make_current = glamor_egl_make_current;
+}
+
+int glamor_egl_fd_name_from_pixmap(ScreenPtr screen,
+                                   PixmapPtr pixmap,
+                                   CARD16 *stride,
+                                   CARD32 *size) {
+   return -1;
+}
+
+int glamor_egl_fds_from_pixmap(ScreenPtr screen,
+                               PixmapPtr pixmap,
+                               int *fds,
+                               uint32_t *offsets,
+                               uint32_t *strides,
+                               uint64_t *modifier) {
+   return 0;
+}
+
+int glamor_egl_fd_from_pixmap(ScreenPtr screen,
+                              PixmapPtr pixmap,
+                              CARD16 *stride,
+                              CARD32 *size) {
+   return -1;
+}
+
+void *renderer_image_from_buffer(AHardwareBuffer* buffer) {
+    const EGLint imageAttributes[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+    EGLClientBuffer clientBuffer;
+    EGLImage image;
+
+    clientBuffer = eglGetNativeClientBufferANDROID(buffer);
+    if (!clientBuffer) {
+        eglCheckError(__LINE__);
+        loge("Failed to obtain EGLClientBuffer from AHardwareBuffer");
+    }
+
+    image = clientBuffer ? eglCreateImageKHR(egl_display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, clientBuffer, imageAttributes) : NULL;
+    if (image == NULL && clientBuffer) {
+        eglCheckError(__LINE__);
+        loge("Binding AHardwareBuffer to an EGLImage failed.");
+    }
+
+    return image;
+}
+
+uint32_t renderer_texture_from_image(void *egl_image) {
+    uint32_t tex;
+
+    if (!eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx))
+        return 0;
+
+    glActiveTexture(GL_TEXTURE0); checkGlError();
+    glGenTextures(1, &tex); checkGlError();
+    glBindTexture(GL_TEXTURE_2D, tex); checkGlError();
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, egl_image); checkGlError();
+    glBindTexture(GL_TEXTURE_2D, 0); checkGlError();
+
+    return tex;
+}
+
+void renderer_destroy_image(void *egl_image) {
+    eglDestroyImage(egl_display, egl_image);
+}
