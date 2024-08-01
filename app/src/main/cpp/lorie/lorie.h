@@ -20,7 +20,7 @@ void lorieInitClipboard(void);
 void lorieRequestClipboard(void);
 void lorieHandleClipboardAnnounce(void);
 void lorieHandleClipboardData(const char* data);
-Bool lorieInitDri3(ScreenPtr pScreen);
+Bool lorieInitDri3(ScreenPtr pScreen, Bool glamor);
 void lorieSetStylusEnabled(Bool enabled);
 void lorieTriggerWorkingQueue(void);
 void lorieChoreographerFrameCallback(__unused long t, AChoreographer* d);

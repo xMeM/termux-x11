@@ -76,6 +76,7 @@ from The Open Group.
 #include "glxserver.h"
 #include "glxutil.h"
 #include "fbconfigs.h"
+#include "glamor.h"
 
 #include "renderer.h"
 #include "inpututils.h"
@@ -130,6 +131,7 @@ typedef struct {
     JavaVM* vm;
     JNIEnv* env;
     Bool dri3;
+    Bool use_glamor;
 
     uint64_t vblank_interval;
     struct xorg_list vblank_queue;
@@ -303,6 +305,7 @@ void ddxUseMsg(void) {
     ErrorF("-legacy-drawing        use legacy drawing, without using AHardwareBuffers\n");
     ErrorF("-force-bgra            force flipping colours (RGBA->BGRA)\n");
     ErrorF("-disable-dri3          disabling DRI3 support (to let lavapipe work)\n");
+    ErrorF("-glamor                enable glamor\n");
 }
 
 int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
@@ -324,6 +327,11 @@ int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
 
     if (strcmp(argv[i], "-disable-dri3") == 0) {
         pvfb->dri3 = FALSE;
+        return 1;
+    }
+
+    if (strcmp(argv[i], "-glamor") == 0) {
+        pvfb->use_glamor = TRUE;
         return 1;
     }
 
@@ -441,11 +449,49 @@ static miPointerScreenFuncRec loriePointerCursorFuncs = {
     .WarpCursor = miPointerWarpCursor
 };
 
+static int lorieSetPixmapVisitWindow(WindowPtr window, void *data)
+{
+    ScreenPtr screen = window->drawable.pScreen;
+
+    if (screen->GetWindowPixmap(window) == data) {
+        screen->SetWindowPixmap(window, screen->GetScreenPixmap(screen));
+        return WT_WALKCHILDREN;
+    }
+    return WT_DONTWALKCHILDREN;
+}
+
 static void lorieUpdateBuffer(void) {
     AHardwareBuffer_Desc d0 = {}, d1 = {};
     AHardwareBuffer *new = NULL, *old = pvfb->root.buffer;
     int status, wasLocked = pvfb->root.locked;
     void *data0 = NULL, *data1 = NULL;
+
+    if (pvfb->use_glamor) {
+        if (pvfb->damage) {
+            DamageDestroy(pvfb->damage);
+        }
+
+        PixmapPtr old_screen_pixmap = pScreenPtr->GetScreenPixmap(pScreenPtr);
+        PixmapPtr new_screen_pixmap = pScreenPtr->CreatePixmap(pScreenPtr, pvfb->root.width, pvfb->root.height, pScreenPtr->rootDepth, CREATE_PIXMAP_USAGE_BACKING_PIXMAP);
+        pScreenPtr->SetScreenPixmap(new_screen_pixmap);
+
+        if (old_screen_pixmap) {
+            pScreenPtr->DestroyPixmap(old_screen_pixmap);
+        }
+
+        if (old_screen_pixmap && pScreenPtr->root && pScreenPtr->SetWindowPixmap) {
+            TraverseTree(pScreenPtr->root, lorieSetPixmapVisitWindow, old_screen_pixmap);
+        }
+
+        uint32_t tex = glamor_get_pixmap_texture(new_screen_pixmap);
+        renderer_set_texture(tex, pvfb->root.width, pvfb->root.height);
+
+        pvfb->damage = DamageCreate(NULL, NULL, DamageReportNone, TRUE, pScreenPtr, NULL);
+        if (!pvfb->damage) {
+            FatalError("Couldn't setup damage\n");
+        }
+        return DamageRegister(&(*pScreenPtr->GetScreenPixmap)(pScreenPtr)->drawable, pvfb->damage);
+    }
 
     if (pvfb->root.legacyDrawing) {
         PixmapPtr pixmap = (PixmapPtr) pScreenPtr->devPrivate;
@@ -521,6 +567,9 @@ static void lorieUpdateBuffer(void) {
 }
 
 static inline void loriePixmapUnlock(PixmapPtr pixmap) {
+    if (pvfb->use_glamor)
+        return;
+
     if (pvfb->root.legacyDrawing)
         return renderer_update_root(pixmap->drawable.width, pixmap->drawable.height, pixmap->devPrivate.ptr, pvfb->root.flip);
 
@@ -535,6 +584,9 @@ static inline Bool loriePixmapLock(PixmapPtr pixmap) {
     AHardwareBuffer_Desc desc = {};
     void *data;
     int status;
+
+    if (pvfb->use_glamor)
+        return TRUE;
 
     if (pvfb->root.legacyDrawing)
         return TRUE;
@@ -720,13 +772,17 @@ lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **argv) {
 
     pvfb->vblank_interval = 1000000 / pvfb->root.framerate;
 
+    ShmRegisterFbFuncs(pScreen);
+    miSyncShmScreenInit(pScreen);
+
     if (FALSE
           || !dixRegisterPrivateKey(&lorieGCPrivateKey, PRIVATE_GC, sizeof(LorieGCPrivRec))
           || !miSetVisualTypesAndMasks(24, ((1 << TrueColor) | (1 << DirectColor)), 8, TrueColor, 0xFF0000, 0x00FF00, 0x0000FF)
           || !miSetPixmapDepths()
           || !fbScreenInit(pScreen, NULL, pvfb->root.width, pvfb->root.height, monitorResolution, monitorResolution, 0, 32)
-          || !(!pvfb->dri3 || lorieInitDri3(pScreen))
           || !fbPictureInit(pScreen, 0, 0)
+          || !(!pvfb->use_glamor || glamor_init(pScreen, GLAMOR_USE_EGL_SCREEN))
+          || !(!pvfb->dri3 || lorieInitDri3(pScreen, pvfb->use_glamor))
           || !lorieRandRInit(pScreen)
           || !miPointerInitialize(pScreen, &loriePointerSpriteFuncs, &loriePointerCursorFuncs, TRUE)
           || !fbCreateDefColormap(pScreen)
@@ -738,8 +794,6 @@ lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **argv) {
     wrap(pvfb, pScreen, CreateGC, lorieCreateGC)
 
     QueueWorkProc(resetRootCursor, NULL, NULL);
-    ShmRegisterFbFuncs(pScreen);
-    miSyncShmScreenInit(pScreen);
 
     return TRUE;
 }                               /* end lorieScreenInit */
@@ -763,6 +817,12 @@ Bool lorieChangeWindow(unused ClientPtr pClient, void *closure) {
     jobject surface = (jobject) closure;
     renderer_set_window(pvfb->env, surface);
     lorieSetCursor(NULL, NULL, CursorForDevice(GetMaster(lorieMouse, MASTER_POINTER)), -1, -1);
+
+    if (pvfb->use_glamor) {
+        SetRootClip(pScreenPtr, ROOT_CLIP_NONE);
+        lorieUpdateBuffer();
+        SetRootClip(pScreenPtr, ROOT_CLIP_FULL);
+    }
 
     if (pvfb->root.legacyDrawing) {
         renderer_update_root(pScreenPtr->width, pScreenPtr->height, ((PixmapPtr) pScreenPtr->devPrivate)->devPrivate.ptr, pvfb->root.flip);
@@ -823,7 +883,7 @@ InitOutput(ScreenInfo * screen_info, int argc, char **argv) {
     screen_info->bitmapBitOrder = BITMAP_BIT_ORDER;
     screen_info->numPixmapFormats = ARRAY_SIZE(depths);
 
-    renderer_init(pvfb->env, &pvfb->root.legacyDrawing, &pvfb->root.flip);
+    renderer_init(pvfb->env, &pvfb->root.legacyDrawing, &pvfb->root.flip, &pvfb->use_glamor);
     xorgGlxCreateVendor();
     lorieInitClipboard();
 

@@ -6,18 +6,18 @@
 #pragma ide diagnostic ignored "UnreachableCode"
 #pragma ide diagnostic ignored "OCUnusedMacroInspection"
 #pragma ide diagnostic ignored "misc-no-recursion"
-#define EGL_EGLEXT_PROTOTYPES
-#define GL_GLEXT_PROTOTYPES
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
 #include <android/native_window_jni.h>
 #include <android/log.h>
 #include <dlfcn.h>
 #include "renderer.h"
 #include "os.h"
+
+#include "epoxy/gl.h"
+#include "epoxy/egl.h"
+#define display _display_
+#include "glamor_priv.h"
+#undef display
 
 #define log(...) __android_log_print(ANDROID_LOG_DEBUG, "gles-renderer", __VA_ARGS__)
 #define loge(...) __android_log_print(ANDROID_LOG_ERROR, "gles-renderer", __VA_ARGS__)
@@ -156,6 +156,7 @@ static struct {
     bool cursorChanged;
 } cursor;
 
+GLuint vao = 0, vbo = 0;
 GLuint g_texture_program = 0, gv_pos = 0, gv_coords = 0;
 GLuint g_texture_program_bgra = 0, gv_pos_bgra = 0, gv_coords_bgra = 0;
 
@@ -167,7 +168,11 @@ static inline __always_inline void bindLinearTexture(GLuint id) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
 
-int renderer_init(JNIEnv* env, int* legacy_drawing, uint8_t* flip) {
+static epoxy_resolver_stub_t resolver_failure_handler(const char *name) {
+    return eglGetProcAddress(name);
+}
+
+int renderer_init(JNIEnv* env, int* legacy_drawing, uint8_t* flip, int* glamor) {
     EGLint major, minor;
     EGLint numConfigs;
     EGLint configAttribs[] = {
@@ -198,6 +203,8 @@ int renderer_init(JNIEnv* env, int* legacy_drawing, uint8_t* flip) {
         loge("Failed to find required Surface.destroy method. Aborting.\n");
         abort();
     }
+
+    epoxy_set_resolver_failure_handler(resolver_failure_handler);
 
     egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (egl_display == EGL_NO_DISPLAY)
@@ -324,6 +331,17 @@ int renderer_init(JNIEnv* env, int* legacy_drawing, uint8_t* flip) {
         }
     }
 
+    if (*glamor && *legacy_drawing) {
+        log("Xlorie: glamor not supported with legacy drawing.\n");
+        *glamor = FALSE;
+    }
+
+    if (*glamor && epoxy_egl_version(egl_display) < 15 &&
+        !epoxy_has_egl_extension(egl_display, "EGL_KHR_surfaceless_context")) {
+        log("Xlorie: glamor required EGL 1.5 or EGL_KHR_surfaceless_context extension.\n");
+        *glamor = FALSE;
+    }
+
     return 1;
 }
 
@@ -365,6 +383,12 @@ static inline __always_inline void release_win_and_surface(JNIEnv *env, jobject*
         (*env)->DeleteGlobalRef(env, *jsfc);
         *jsfc = NULL;
     }
+}
+
+void renderer_set_texture(uint32_t tex, uint32_t width, uint32_t height) {
+    display.width = width;
+    display.height = height;
+    display.id = tex;
 }
 
 void renderer_set_window(JNIEnv* env, jobject new_surface) {
@@ -435,10 +459,14 @@ void renderer_set_window(JNIEnv* env, jobject new_surface) {
         glActiveTexture(GL_TEXTURE0);
         glGenTextures(1, &display.id);
         glGenTextures(1, &cursor.id);
+
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
     }
 
     eglSwapInterval(egl_display, 0);
 
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, ANativeWindow_getWidth(win), ANativeWindow_getHeight(win));
     log("Xlorie: new surface applied: %p\n", sfc);
 
@@ -511,6 +539,8 @@ static void renderer_renew_image(void) {
 
 int renderer_redraw(JNIEnv* env, uint8_t flip) {
     int err = EGL_SUCCESS;
+    int width = win ? ANativeWindow_getWidth(win) : -1;
+    int height = win ? ANativeWindow_getHeight(win) : -1;
 
     if (bufferChanged)
         renderer_renew_image();
@@ -528,6 +558,8 @@ int renderer_redraw(JNIEnv* env, uint8_t flip) {
         pthread_mutex_unlock(&state->cursor.lock);
     }
 
+    glBindFramebuffer(GL_FRAMEBUFFER, 0); checkGlError();
+    glViewport(0, 0, width, height); checkGlError();
     draw(display.id,  -1.f, -1.f, 1.f, 1.f, flip);
     draw_cursor();
     if (eglSwapBuffers(egl_display, sfc) != EGL_TRUE) {
@@ -615,17 +647,25 @@ static void draw(GLuint id, float x0, float y0, float x1, float y1, uint8_t flip
         x1, -y1, 1.f, 1.f,
     };
 
+    GLint old_vao;
     GLuint p = flip ? gv_pos_bgra : gv_pos, c = flip ? gv_coords_bgra : gv_coords;
+
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &old_vao);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(coords), coords, GL_STATIC_DRAW);
 
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(flip ? g_texture_program_bgra : g_texture_program);
     glBindTexture(GL_TEXTURE_2D, id);
 
-    glVertexAttribPointer(p, 2, GL_FLOAT, GL_FALSE, 16, coords);
-    glVertexAttribPointer(c, 2, GL_FLOAT, GL_FALSE, 16, &coords[2]);
+    glVertexAttribPointer(p, 2, GL_FLOAT, GL_FALSE, 16, (GLvoid *)0);
+    glVertexAttribPointer(c, 2, GL_FLOAT, GL_FALSE, 16, (GLvoid *)(sizeof(GLfloat) * 2));
     glEnableVertexAttribArray(p);
     glEnableVertexAttribArray(c);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4); checkGlError();
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    glBindVertexArray(old_vao);
 }
 
 __unused static void draw_cursor(void) {
@@ -649,4 +689,85 @@ __unused static void draw_cursor(void) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     draw(cursor.id, x, y, x + w, y + h, false);
     glDisable(GL_BLEND);
+}
+
+static void glamor_egl_make_current(struct glamor_context *glamor_ctx) {
+   /* There's only a single global dispatch table in Mesa.  EGL, GLX,
+    * and AIGLX's direct dispatch table manipulation don't talk to
+    * each other.  We need to set the context to NULL first to avoid
+    * EGL's no-op context change fast path when switching back to
+    * EGL.
+    */
+   eglMakeCurrent(glamor_ctx->_display_,
+                  EGL_NO_SURFACE,
+                  EGL_NO_SURFACE,
+                  EGL_NO_CONTEXT);
+
+   if (!eglMakeCurrent(glamor_ctx->_display_,
+                       sfc,
+                       sfc,
+                       glamor_ctx->ctx)) {
+      FatalError("Failed to make EGL context current\n");
+   }
+}
+
+void glamor_egl_screen_init(ScreenPtr screen,
+                            struct glamor_context *glamor_ctx) {
+   glamor_enable_dri3(screen);
+   glamor_ctx->_display_ = egl_display;
+   glamor_ctx->ctx = ctx;
+   glamor_ctx->make_current = glamor_egl_make_current;
+}
+
+int glamor_egl_fd_name_from_pixmap(ScreenPtr screen,
+                                   PixmapPtr pixmap,
+                                   CARD16 *stride,
+                                   CARD32 *size) {
+   return -1;
+}
+
+int glamor_egl_fds_from_pixmap(ScreenPtr screen,
+                               PixmapPtr pixmap,
+                               int *fds,
+                               uint32_t *offsets,
+                               uint32_t *strides,
+                               uint64_t *modifier) {
+   return 0;
+}
+
+int glamor_egl_fd_from_pixmap(ScreenPtr screen,
+                              PixmapPtr pixmap,
+                              CARD16 *stride,
+                              CARD32 *size) {
+   return -1;
+}
+
+uint32_t renderer_texture_from_buffer(AHardwareBuffer* buffer) {
+    EGLImageKHR image;
+    uint32_t tex;
+
+    if (eglMakeCurrent(egl_display, sfc, sfc, ctx) != EGL_TRUE) {
+        log("Xlorie: eglMakeCurrent failed.\n");
+        return 0;
+    }
+
+    image = eglCreateImageKHR(egl_display, EGL_NO_CONTEXT,
+        EGL_NATIVE_BUFFER_ANDROID, eglGetNativeClientBufferANDROID(buffer),
+            (EGLint[]){EGL_IMAGE_PRESERVED, EGL_TRUE, EGL_NONE});
+
+    if (image == EGL_NO_IMAGE)
+        return 0;
+
+    glActiveTexture(GL_TEXTURE0); checkGlError();
+    glGenTextures(1, &tex); checkGlError();
+    glBindTexture(GL_TEXTURE_2D, tex); checkGlError();
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); checkGlError();
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); checkGlError();
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); checkGlError();
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); checkGlError();
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image); checkGlError();
+    glBindTexture(GL_TEXTURE_2D, 0); checkGlError();
+
+    eglDestroyImage(egl_display, image);
+    return tex;
 }
