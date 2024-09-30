@@ -817,7 +817,7 @@ void *renderer_image_from_buffer(AHardwareBuffer* buffer) {
     return image;
 }
 
-uint32_t renderer_texture_from_image(void *egl_image) {
+uint32_t renderer_texture_from_image(void *egl_image, int flip) {
     uint32_t tex;
 
     if (!eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx))
@@ -826,6 +826,12 @@ uint32_t renderer_texture_from_image(void *egl_image) {
     glActiveTexture(GL_TEXTURE0); checkGlError();
     glGenTextures(1, &tex); checkGlError();
     glBindTexture(GL_TEXTURE_2D, tex); checkGlError();
+    if (flip) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE); checkGlError();
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_GREEN); checkGlError();
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED); checkGlError();
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ALPHA); checkGlError();
+    }
     glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, egl_image); checkGlError();
     glBindTexture(GL_TEXTURE_2D, 0); checkGlError();
 

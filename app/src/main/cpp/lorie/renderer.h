@@ -22,7 +22,7 @@ __unused void renderer_update_cursor(int w, int h, int xhot, int yhot, void* dat
 __unused void renderer_set_cursor_coordinates(int x, int y);
 
 __unused void *renderer_image_from_buffer(AHardwareBuffer* buffer);
-__unused uint32_t renderer_texture_from_image(void *egl_image);
+__unused uint32_t renderer_texture_from_image(void *egl_image, int flip);
 __unused void renderer_destroy_image(void *egl_image);
 
 #define AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM 5 // Stands to HAL_PIXEL_FORMAT_BGRA_8888

@@ -441,6 +441,7 @@ lorieDestroyPixmap(PixmapPtr pPixmap) {
 static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *fds, CARD16 width, CARD16 height,
                                     const CARD32 *strides, const CARD32 *offsets, CARD8 depth, __unused CARD8 bpp, CARD64 modifier) {
     const CARD64 AHARDWAREBUFFER_SOCKET_FD = 1255;
+    const CARD64 AHARDWAREBUFFER_SOCKET_FD_NO_FLIP = 1256;
     const CARD64 RAW_MMAPPABLE_FD = 1274;
     PixmapPtr pixmap = NullPixmap;
     LorieAHBPixPrivPtr pPixPriv = NULL;
@@ -450,7 +451,8 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
         return NULL;
     }
 
-    if (modifier != RAW_MMAPPABLE_FD && modifier != AHARDWAREBUFFER_SOCKET_FD) {
+    if (modifier != RAW_MMAPPABLE_FD && modifier != AHARDWAREBUFFER_SOCKET_FD
+        && modifier != AHARDWAREBUFFER_SOCKET_FD_NO_FLIP) {
         log(ERROR, "DRI3: Modifier is not RAW_MMAPPABLE_FD or AHARDWAREBUFFER_SOCKET_FD");
         return NULL;
     }
@@ -473,7 +475,7 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
         screen->ModifyPixmapHeader(pixmap, width, height, 0, 0, strides[0], addr);
 
         return pixmap;
-    } else if (modifier == AHARDWAREBUFFER_SOCKET_FD) {
+    } else if (modifier == AHARDWAREBUFFER_SOCKET_FD || modifier == AHARDWAREBUFFER_SOCKET_FD_NO_FLIP) {
         AHardwareBuffer_Desc desc;
         struct stat info;
         int r;
@@ -536,7 +538,8 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
                 goto fail;
             }
 
-            uint32_t texture = renderer_texture_from_image(pPixPriv->image);
+            Bool flip = modifier != AHARDWAREBUFFER_SOCKET_FD_NO_FLIP;
+            uint32_t texture = renderer_texture_from_image(pPixPriv->image, flip);
             if (!texture) {
                 log(ERROR, "DRI3: AHARDWAREBUFFER_SOCKET_FD: failed to create Texture from EGLImage");
                 renderer_destroy_image(pPixPriv->image);
