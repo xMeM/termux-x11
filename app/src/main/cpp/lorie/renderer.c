@@ -438,7 +438,7 @@ void renderer_set_buffer(JNIEnv* env, AHardwareBuffer* buf) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &data); checkGlError();
     }
 
-    renderer_redraw(env, flip);
+    renderer_redraw(env, flip, 0);
 
     log("renderer_set_buffer %p %d %d", buffer, desc.width, desc.height);
 }
@@ -612,7 +612,7 @@ int renderer_should_redraw(void) {
     return sfc != EGL_NO_SURFACE && eglGetCurrentContext() != EGL_NO_CONTEXT;
 }
 
-int renderer_redraw(JNIEnv* env, uint8_t flip) {
+int renderer_redraw(JNIEnv* env, uint8_t flip, uint64_t presentTime) {
     int err = EGL_SUCCESS;
     int width = win ? ANativeWindow_getWidth(win) : -1;
     int height = win ? ANativeWindow_getHeight(win) : -1;
@@ -625,6 +625,8 @@ int renderer_redraw(JNIEnv* env, uint8_t flip) {
     glViewport(0, 0, width, height); checkGlError();
     draw(display.id,  -1.f, -1.f, 1.f, 1.f, flip);
     draw_cursor();
+    if (presentTime)
+        eglPresentationTimeANDROID(egl_display, sfc, presentTime);
     if (eglSwapBuffers(egl_display, sfc) != EGL_TRUE) {
         err = eglGetError();
         eglCheckError(__LINE__);

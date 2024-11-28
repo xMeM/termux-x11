@@ -50,6 +50,7 @@ from The Open Group.
 #include <android/native_window.h>
 #include <android/hardware_buffer.h>
 #include <sys/wait.h>
+#include <sys/eventfd.h>
 #include <selection.h>
 #include <X11/Xatom.h>
 #include <present.h>
@@ -75,6 +76,8 @@ from The Open Group.
 #include "glxutil.h"
 #include "fbconfigs.h"
 #include "glamor.h"
+#include "list.h"
+#include "os.h"
 
 #include "renderer.h"
 #include "inpututils.h"
@@ -88,6 +91,12 @@ from The Open Group.
 
 extern DeviceIntPtr lorieMouse, lorieKeyboard;
 
+typedef struct lorie_vblank {
+    struct xorg_list            list;
+    uint64_t                    event_id;
+    uint64_t                    target_msc;
+} lorie_vblank_rec, *lorie_vblank_ptr;
+
 typedef struct {
     CloseScreenProcPtr CloseScreen;
     CreateScreenResourcesProcPtr CreateScreenResources;
@@ -97,7 +106,6 @@ typedef struct {
     OsTimerPtr fpsTimer;
 
     Bool cursorMoved;
-    int timerFd;
 
     struct {
         AHardwareBuffer* buffer;
@@ -111,6 +119,8 @@ typedef struct {
     JNIEnv* env;
     Bool dri3;
     Bool use_glamor;
+    uint64_t msc;
+    struct xorg_list vblank_queue;
 } lorieScreenInfo, *lorieScreenInfoPtr;
 
 ScreenPtr pScreenPtr;
@@ -485,19 +495,36 @@ static inline Bool loriePixmapLock(PixmapPtr pixmap) {
     return pvfb->root.locked;
 }
 
-static void lorieTimerCallback(int fd, unused int r, void *arg) {
-    char dummy[8];
-    read(fd, dummy, 8);
+static void lorieFrameCallback(int fd, unused int r, void *arg) {
+    lorie_vblank_ptr vblank, tmp;
+    eventfd_t present_time = 0;
+
+    if (eventfd_read(fd, &present_time) < 0 || present_time == 0)
+        return;
+
+    uint64_t ust = GetTimeInMicros();
+    uint64_t msc = ++pvfb->msc;
+
+    xorg_list_for_each_entry_safe(vblank, tmp, &pvfb->vblank_queue, list) {
+        if (vblank->target_msc <= pvfb->msc) {
+            present_event_notify(vblank->event_id, ust, msc);
+            xorg_list_del(&vblank->list);
+            free(vblank);
+        }
+    }
+
     if (renderer_should_redraw() && RegionNotEmpty(DamageRegion(pvfb->damage))) {
         int redrawn = FALSE;
         ScreenPtr pScreen = (ScreenPtr) arg;
 
         loriePixmapUnlock(pScreen->GetScreenPixmap(pScreen));
-        redrawn = renderer_redraw(pvfb->env, pvfb->root.flip);
+        redrawn = renderer_redraw(pvfb->env,
+                                  pvfb->root.flip,
+                                  present_time);
         if (loriePixmapLock(pScreen->GetScreenPixmap(pScreen)) && redrawn)
             DamageEmpty(pvfb->damage);
     } else if (pvfb->cursorMoved)
-        renderer_redraw(pvfb->env, pvfb->root.flip);
+        renderer_redraw(pvfb->env, pvfb->root.flip, present_time);
 
     pvfb->cursorMoved = FALSE;
 }
@@ -609,19 +636,63 @@ static Bool resetRootCursor(unused ClientPtr pClient, unused void *closure) {
     return TRUE;
 }
 
+static RRCrtcPtr lorie_get_crtc(WindowPtr window) {
+    return RRFirstEnabledCrtc(window->drawable.pScreen);
+}
+
+static int
+lorie_get_ust_msc(RRCrtcPtr crtc, uint64_t *ust, uint64_t *msc)
+{
+    *ust = GetTimeInMicros();
+    *msc = pvfb->msc;
+    return Success;
+}
+
+static Bool lorie_queue_vblank(RRCrtcPtr crtc,
+                               uint64_t event_id,
+                               uint64_t msc) {
+    lorie_vblank_ptr vblank;
+
+    vblank = calloc (1, sizeof (lorie_vblank_rec));
+    if (!vblank)
+        return BadAlloc;
+
+    vblank->event_id = event_id;
+    vblank->target_msc = msc;
+
+    xorg_list_append(&vblank->list, &pvfb->vblank_queue);
+
+    return Success;
+}
+
+static void lorie_abort_vblank(RRCrtcPtr crtc,
+                               uint64_t event_id,
+                               uint64_t msc) {
+    lorie_vblank_ptr vblank, tmp;
+
+    xorg_list_for_each_entry_safe(vblank, tmp, &pvfb->vblank_queue, list) {
+        if (vblank->event_id == event_id) {
+            xorg_list_del(&vblank->list);
+            free (vblank);
+            break;
+        }
+    }
+}
+
+struct present_screen_info lorie_present_info = {
+    .get_crtc = lorie_get_crtc,
+    .get_ust_msc = lorie_get_ust_msc,
+    .queue_vblank = lorie_queue_vblank,
+    .abort_vblank = lorie_abort_vblank,
+};
+
 static Bool
 lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **argv) {
-    static int timerFd = -1;
     pScreenPtr = pScreen;
 
-    if (timerFd == -1) {
-        struct itimerspec spec = {0};
-        timerFd = timerfd_create(CLOCK_MONOTONIC,  0);
-        timerfd_settime(timerFd, 0, &spec, NULL);
-    }
-
-    pvfb->timerFd = timerFd;
-    SetNotifyFd(timerFd, lorieTimerCallback, X_NOTIFY_READ, pScreen);
+    pvfb->msc = 0;
+    xorg_list_init(&pvfb->vblank_queue);
+    SetNotifyFd(vsyncFd, lorieFrameCallback, X_NOTIFY_READ, pScreen);
 
     miSetZeroLineBias(pScreen, 0);
     pScreen->blackPixel = 0;
@@ -638,7 +709,8 @@ lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **argv) {
           || !(!pvfb->dri3 || lorieInitDri3(pScreen, pvfb->use_glamor))
           || !lorieRandRInit(pScreen)
           || !miPointerInitialize(pScreen, &loriePointerSpriteFuncs, &loriePointerCursorFuncs, TRUE)
-          || !fbCreateDefColormap(pScreen))
+          || !fbCreateDefColormap(pScreen)
+          || !present_screen_init(pScreen, &lorie_present_info))
         return FALSE;
 
     wrap(pvfb, pScreen, CreateScreenResources, lorieCreateScreenResources)
@@ -686,7 +758,7 @@ Bool lorieChangeWindow(unused ClientPtr pClient, void *closure) {
 
     if (pvfb->root.legacyDrawing) {
         renderer_update_root(pScreenPtr->width, pScreenPtr->height, ((PixmapPtr) pScreenPtr->devPrivate)->devPrivate.ptr, pvfb->root.flip);
-        renderer_redraw(pvfb->env, pvfb->root.flip);
+        renderer_redraw(pvfb->env, pvfb->root.flip, 0);
     }
 
     return TRUE;
@@ -704,16 +776,6 @@ void lorieConfigureNotify(int width, int height, int framerate) {
         RROutputSetModes(output, &mode, 1, 0);
         RRCrtcNotify(RRFirstEnabledCrtc(pScreen), mode,0, 0,RR_Rotate_0, NULL, 1, &output);
         RRScreenSizeSet(pScreen, mode->mode.width, mode->mode.height, mmWidth, mmHeight);
-    }
-
-    if (framerate > 0) {
-        long nsecs = 1000 * 1000 * 1000 / framerate;
-        struct itimerspec spec = { { 0, nsecs }, { 0, nsecs } };
-        timerfd_settime(lorieScreen.timerFd, 0, &spec, NULL);
-        log(VERBOSE, "New framerate is %d", framerate);
-
-        FakeScreenFps = framerate;
-        present_fake_screen_init(pScreen);
     }
 }
 

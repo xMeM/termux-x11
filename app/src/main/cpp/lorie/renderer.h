@@ -14,7 +14,7 @@ __unused void renderer_set_buffer(JNIEnv* env, AHardwareBuffer* buffer);
 __unused void renderer_set_texture(uint32_t tex, uint32_t width, uint32_t height);
 __unused void renderer_set_window(JNIEnv* env, jobject surface, AHardwareBuffer* buffer);
 __unused int renderer_should_redraw(void);
-__unused int renderer_redraw(JNIEnv* env, uint8_t flip);
+__unused int renderer_redraw(JNIEnv* env, uint8_t flip, uint64_t presentTime);
 __unused void renderer_print_fps(float millis);
 
 __unused void renderer_update_root(int w, int h, void* data, uint8_t flip);

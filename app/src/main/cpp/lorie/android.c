@@ -9,6 +9,8 @@
 #include <jni.h>
 #include <android/log.h>
 #include <android/native_window_jni.h>
+#include <android/choreographer.h>
+#include <sys/eventfd.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/prctl.h>
@@ -36,6 +38,8 @@ void lorieKeysymKeyboardEvent(KeySym keysym, int down);
 
 char *xtrans_unix_path_x11 = NULL;
 char *xtrans_unix_dir_x11 = NULL;
+
+int vsyncFd = -1;
 
 typedef enum {
     EVENT_SCREEN_SIZE,
@@ -123,6 +127,12 @@ static jclass FindClassOrDie(JNIEnv *env, const char* name) {
     }
 
     return (*env)->NewGlobalRef(env, clazz);
+}
+
+void FrameCallback(int64_t frameTimeNanos, void* data) {
+    AChoreographer_postFrameCallback64((AChoreographer *)data,
+                                       FrameCallback, data);
+    eventfd_write(vsyncFd, (eventfd_t)frameTimeNanos);
 }
 
 static jclass FindMethodOrDie(JNIEnv *env, jclass clazz, const char* name, const char* signature, jboolean isStatic) {
@@ -260,6 +270,10 @@ Java_com_termux_x11_CmdEntryPoint_start(JNIEnv *env, __unused jclass cls, jobjec
     }
 
     (*env)->GetJavaVM(env, &vm);
+
+    vsyncFd = eventfd(0, EFD_CLOEXEC);
+    AChoreographer *grapher = AChoreographer_getInstance();
+    AChoreographer_postFrameCallback64(grapher, FrameCallback, grapher);
 
     pthread_create(&t, NULL, startServer, vm);
     return JNI_TRUE;
