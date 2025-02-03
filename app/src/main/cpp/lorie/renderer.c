@@ -7,16 +7,12 @@
 #pragma ide diagnostic ignored "OCUnusedMacroInspection"
 #pragma ide diagnostic ignored "misc-no-recursion"
 #pragma clang diagnostic ignored "-Wincompatible-pointer-types-discards-qualifiers"
-#define EGL_EGLEXT_PROTOTYPES
-#define GL_GLEXT_PROTOTYPES
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
 #include <android/native_window_jni.h>
 #include <android/log.h>
 #include <dlfcn.h>
+#include <epoxy/gl.h>
+#include <epoxy/egl.h>
 #include <sys/mman.h>
 #include "list.h"
 #include "lorie.h"
@@ -174,6 +170,8 @@ int rendererInitThread(JavaVM *vm) {
     xorg_list_init(&removedBuffers);
 
     (*vm)->AttachCurrentThread(vm, &env, NULL);
+
+    epoxy_set_resolver_failure_handler(eglGetProcAddress);
 
     egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (egl_display == EGL_NO_DISPLAY)
