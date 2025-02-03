@@ -3,21 +3,16 @@
 #pragma ide diagnostic ignored "ConstantParameter"
 #pragma ide diagnostic ignored "OCUnusedGlobalDeclarationInspection"
 #pragma ide diagnostic ignored "OCUnusedMacroInspection"
-#define EGL_EGLEXT_PROTOTYPES
-#define GL_GLEXT_PROTOTYPES
+
 #include <string.h>
 #include <stdlib.h>
-#include <math.h>
 #include <pixman.h>
 #include <stdbool.h>
 #include <linux/memfd.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <epoxy/egl.h>
 #include <errno.h>
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
 #include "list.h"
 #include "buffer.h"
 
