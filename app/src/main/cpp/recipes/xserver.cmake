@@ -51,6 +51,7 @@ set(inc "${CMAKE_CURRENT_BINARY_DIR}"
         "xserver/randr"
         "xserver/render"
         "xserver/xfixes"
+        "xserver/glamor"
         "xserver/glx"
         "xserver/exa")
 
@@ -259,8 +260,21 @@ add_library(xserver_glxvnd STATIC ${GLXVND_SOURCES})
 target_include_directories(xserver_glxvnd PRIVATE ${inc})
 target_compile_options(xserver_glxvnd PRIVATE ${compile_options})
 
+set(GLAMOR_SOURCES glamor.c glamor_glyphblt.c glamor_spans.c glamor_addtraps.c glamor_gradient.c
+        glamor_sync.c glamor_composite_glyphs.c glamor_image.c glamor_text.c glamor_compositerects.c
+        glamor_largepixmap.c glamor_transfer.c glamor_copy.c glamor_lines.c glamor_transform.c
+        glamor_core.c glamor_picture.c glamor_trapezoid.c glamor_dash.c glamor_pixmap.c
+        glamor_triangles.c glamor_points.c glamor_utils.c glamor_prepare.c glamor_vbo.c
+        glamor_program.c glamor_window.c glamor_fbo.c glamor_rects.c glamor_font.c glamor_render.c
+        glamor_segs.c)
+list(TRANSFORM GLAMOR_SOURCES PREPEND "xserver/glamor/")
+add_library(xserver_glamor STATIC ${GLAMOR_SOURCES})
+target_include_directories(xserver_glamor PRIVATE ${inc})
+target_link_libraries(xserver_glamor PRIVATE epoxy)
+target_compile_options(xserver_glamor PRIVATE ${compile_options})
+
 set(XSERVER_LIBS tirpc Xdmcp Xau pixman Xfont2 fontenc epoxy xshmfence xkbcomp)
-foreach (part glx glxvnd fb mi dix composite damageext dbe randr miext_damage render present xext
+foreach (part glamor glx glxvnd fb mi dix composite damageext dbe randr miext_damage render present xext
          dri3 miext_sync xfixes xi xkb record xi_stubs xkb_stubs os exa)
     set(XSERVER_LIBS ${XSERVER_LIBS} xserver_${part})
 endforeach ()
@@ -277,6 +291,7 @@ add_library(Xlorie SHARED
         "lorie/InputXKB.c"
         "lorie/renderer.c"
         "lorie/buffer.c"
+        "lorie/glamor_egl_android.c"
         "lorie/activity.c")
 target_include_directories(Xlorie PRIVATE ${inc} "libxcvt/include")
 target_link_options(Xlorie PRIVATE "-Wl,--as-needed" "-Wl,--no-undefined" "-fvisibility=hidden")
