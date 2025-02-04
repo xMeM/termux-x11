@@ -221,6 +221,8 @@ LorieBuffer* _Nullable LorieBufferList_first(struct xorg_list* _Nullable list);
  */
 LorieBuffer* _Nullable LorieBufferList_findById(struct xorg_list* _Nullable list, uint64_t id);
 
+int LorieBuffer_getGLTexture(LorieBuffer* _Nonnull buffer);
+
 #undef STATIC_INLINE
 
 int ancil_send_fd(int sock, int fd);
