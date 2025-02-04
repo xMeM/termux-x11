@@ -451,6 +451,10 @@ __LIBC_HIDDEN__ LorieBuffer* _Nullable LorieBufferList_findById(struct xorg_list
     return NULL;
 }
 
+int LorieBuffer_getGLTexture(LorieBuffer *buffer) {
+    return buffer->id;
+}
+
 __LIBC_HIDDEN__ int ancil_send_fd(int sock, int fd) {
     char nothing = '!';
     struct iovec nothing_ptr = { .iov_base = &nothing, .iov_len = 1 };

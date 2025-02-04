@@ -30,6 +30,8 @@
 #include "shmint.h"
 #include "present_priv.h"
 #include "misyncshm.h"
+#include "glamor.h"
+#include "glamor_egl_android.h"
 #include "glxserver.h"
 #include "glxutil.h"
 #include "fbconfigs.h"
@@ -76,6 +78,7 @@ typedef struct {
     } root;
 
     Bool dri3;
+    Bool glamor;
 
     uint64_t vblank_interval;
     struct xorg_list vblank_queue;
@@ -135,7 +138,12 @@ void OsVendorInit(void) {
 void lorieActivityConnected(void) {
     pvfb->state->drawRequested = pvfb->state->cursor.updated = true;
     lorieSendSharedServerState(pvfb->stateFd);
-    lorieRegisterBuffer(LORIE_BUFFER_FROM_PIXMAP(pScreenPtr->devPrivate));
+    if (pvfb->glamor) {
+        LorieBuffer *pixmap_bo = glamor_egl_get_pixmap_lorie_buffer(pScreenPtr->devPrivate);
+        lorieRegisterBuffer(pixmap_bo);
+    } else {
+        lorieRegisterBuffer(LORIE_BUFFER_FROM_PIXMAP(pScreenPtr->devPrivate));
+    }
 }
 
 static LoriePixmapPriv* lorieRootWindowPixmapPriv(void) {
@@ -256,6 +264,7 @@ void ddxUseMsg(void) {
     ErrorF("-disable-dri3          disabling DRI3 support (to let lavapipe work)\n");
     ErrorF("-force-sysvshm         force using SysV shm syscalls\n");
     ErrorF("-check-drawing         run server only able to draw some test image (for testing if rendering root window works or not),\n");
+    ErrorF("-glamor-gles           experimental opengl es acceleration\n");
 }
 
 int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
@@ -288,6 +297,11 @@ int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
     if (strcmp(argv[i], "-check-drawing") == 0) {
         NoListenAll = TRUE;
         QueueWorkProc(drawSquares, NULL, NULL);
+        return 1;
+    }
+
+    if (strcmp(argv[i], "-glamor-gles") == 0) {
+        pvfb->glamor = TRUE;
         return 1;
     }
 
@@ -398,7 +412,7 @@ static void loriePerformVblanks(void);
 
 static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
     int status, nonEmpty;
-    LoriePixmapPriv* priv;
+    LoriePixmapPriv* priv = NULL;
     PixmapPtr root = pScreenPtr && pScreenPtr->root ? pScreenPtr->GetWindowPixmap(pScreenPtr->root) : NULL;
 
     pvfb->current_msc++;
@@ -410,13 +424,17 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
         return TRUE;
 
     nonEmpty = RegionNotEmpty(DamageRegion(pvfb->damage));
-    priv = root ? exaGetPixmapDriverPrivate(root) : NULL;
 
-    if (!priv)
+    if (pvfb->glamor)
+        glamor_finish(pScreenPtr);
+    else
+        priv = root ? exaGetPixmapDriverPrivate(root) : NULL;
+
+    if (!priv && !pvfb->glamor)
         // Impossible situation, but let's skip this step
         return TRUE;
 
-    if (nonEmpty && priv->buffer) {
+    if (nonEmpty && priv && priv->buffer) {
         // We should unlock and lock buffer in order to update texture content on some devices
         // In most cases AHardwareBuffer uses DMA memory which is shared between CPU and GPU
         // and this is not needed. But according to docs we should do it for any case.
@@ -428,13 +446,20 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
             if (status)
                 FatalError("Failed to lock the surface: %d\n", status);
         }
+    }
 
+    if (nonEmpty) {
         DamageEmpty(pvfb->damage);
         pvfb->state->drawRequested = TRUE;
     }
 
     if (pvfb->state->drawRequested || pvfb->state->cursor.moved || pvfb->state->cursor.updated) {
-        pvfb->state->rootWindowTextureID = LorieBuffer_description(priv->buffer)->id;
+        if (pvfb->glamor) {
+            LorieBuffer *root_bo = glamor_egl_get_pixmap_lorie_buffer(root);
+            pvfb->state->rootWindowTextureID = LorieBuffer_description(root_bo)->id;
+        } else {
+            pvfb->state->rootWindowTextureID = LorieBuffer_description(priv->buffer)->id;
+        }
 
         // Sending signal about pending root window changes to renderer thread.
         // We do not explicitly lock the pvfb->state->lock here because we do not want to wait
@@ -464,15 +489,22 @@ static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
     DamageRegister(&(*pScreen->GetScreenPixmap)(pScreen)->drawable, pvfb->damage);
     pvfb->fpsTimer = TimerSet(NULL, 0, 5000, lorieFramecounter, pScreen);
 
-    lorieRegisterBuffer(LORIE_BUFFER_FROM_PIXMAP(pScreenPtr->devPrivate));
+    if (pvfb->glamor) {
+        LorieBuffer *pixmap_bo = glamor_egl_get_pixmap_lorie_buffer(pScreen->devPrivate);
+        lorieRegisterBuffer(pixmap_bo);
+    } else {
+        lorieRegisterBuffer(LORIE_BUFFER_FROM_PIXMAP(pScreenPtr->devPrivate));
+    }
 
     return TRUE;
 }
 
 static Bool lorieCloseScreen(ScreenPtr pScreen) {
     pScreenPtr = NULL;
-    pScreen->DestroyPixmap(pScreen->devPrivate);
-    pScreen->devPrivate = NULL;
+    if (!pvfb->glamor) {
+        pScreen->DestroyPixmap(pScreen->devPrivate);
+        pScreen->devPrivate = NULL;
+    }
     pScreen->CloseScreen = pvfb->CloseScreen;
     return pScreen->CloseScreen(pScreen);
 }
@@ -554,7 +586,12 @@ static Bool lorieRRScreenSetSize(ScreenPtr pScreen, CARD16 width, CARD16 height,
         pScreen->DestroyPixmap(oldPixmap);
     }
 
-    lorieRegisterBuffer(LORIE_BUFFER_FROM_PIXMAP(pScreenPtr->devPrivate));
+    if (pvfb->glamor) {
+        LorieBuffer *pixmap_bo = glamor_egl_get_pixmap_lorie_buffer(newPixmap);
+        lorieRegisterBuffer(pixmap_bo);
+    } else {
+        lorieRegisterBuffer(LORIE_BUFFER_FROM_PIXMAP(pScreenPtr->devPrivate));
+    }
 
     pScreen->ResizeWindow(pScreen->root, 0, 0, width, height, NULL);
     RegionReset(&pScreen->root->winSize, &box);
@@ -649,9 +686,9 @@ static Bool lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **ar
           || !miSetPixmapDepths()
           || !fbScreenInit(pScreen, NULL, pvfb->root.width, pvfb->root.height, monitorResolution, monitorResolution, 0, 32)
           || !(pScreen->CreateScreenResources = lorieCreateScreenResources) // Simply replace unneeded function
-          || !(!pvfb->dri3 || dri3_screen_init(pScreen, &lorieDri3Info))
           || !fbPictureInit(pScreen, 0, 0)
-          || !exaDriverInit(pScreen, &lorieExa)
+          || !(!pvfb->glamor ? exaDriverInit(pScreen, &lorieExa) : glamor_egl_init(pScreen))
+          || !(!pvfb->dri3 || dri3_screen_init(pScreen, &lorieDri3Info))
           || !lorieRandRInit(pScreen)
           || !miPointerInitialize(pScreen, &loriePointerSpriteFuncs, &loriePointerCursorFuncs, TRUE)
           || !fbCreateDefColormap(pScreen)
@@ -929,6 +966,7 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
     const CARD64 AHARDWAREBUFFER_SOCKET_FD = 1255;
     const CARD64 AHARDWAREBUFFER_FLIPPED_SOCKET_FD = 1256;
     const CARD64 RAW_MMAPPABLE_FD = 1274;
+    AHardwareBuffer *buffer = NULL;
     AHardwareBuffer_Desc desc = {0};
     PixmapPtr pixmap = NullPixmap;
     LoriePixmapPriv *priv = NULL;
@@ -940,14 +978,10 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
     pixmap = screen->CreatePixmap(screen, 0, 0, depth, 0);
     check(!pixmap, "DRI3: failed to create pixmap");
 
-    priv = exaGetPixmapDriverPrivate(pixmap);
-    check(!priv, "DRI3: failed to obtain pixmap private");
-
-    priv->imported = true;
-
     if (modifier == DRM_FORMAT_MOD_INVALID || modifier == RAW_MMAPPABLE_FD) {
         check(!(priv->buffer = LorieBuffer_wrapFileDescriptor(width, strides[0]/4, height, AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, fds[0], offsets[0])), "DRI3: LorieBuffer_wrapAHardwareBuffer failed.");
         screen->ModifyPixmapHeader(pixmap, width, height, 0, 0, strides[0], NULL);
+        priv->imported = true;
         return pixmap;
     }
 
@@ -957,7 +991,6 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
         uint8_t buf = 1;
         int r;
 
-        priv->flipped = modifier == AHARDWAREBUFFER_FLIPPED_SOCKET_FD;
         check(fstat(fds[0], &info) != 0, "DRI3: fstat failed: %s", strerror(errno));
         check(!S_ISSOCK(info.st_mode), "DRI3: modifier is AHARDWAREBUFFER_SOCKET_FD but fd is not a socket");
         // Sending signal to other end of socket to send buffer.
@@ -970,14 +1003,28 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
             && desc.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM
             && desc.format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM,
             "DRI3: AHARDWAREBUFFER_SOCKET_FD: wrong format of AHardwareBuffer. Must be one of: AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM, AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM, AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM (stands for 5).");
-        check(!(priv->buffer = LorieBuffer_wrapAHardwareBuffer(buffer)), "DRI3: LorieBuffer_wrapAHardwareBuffer failed.");
 
         screen->ModifyPixmapHeader(pixmap, desc.width, desc.height, 0, 0, desc.stride * 4, NULL);
+
+        if (pvfb->glamor) {
+            screen->DestroyPixmap(pixmap);
+            pixmap = glamor_egl_create_pixmap_from_ahardware_buffer(screen, depth, buffer);
+            check(!pixmap, "DRI3: failed to create pixmap from AHardwareBuffer");
+        } else {
+            priv = exaGetPixmapDriverPrivate(pixmap);
+            check(!priv, "DRI3: failed to obtain pixmap private");
+            check(!(priv->buffer = LorieBuffer_wrapAHardwareBuffer(buffer)), "DRI3: LorieBuffer_wrapAHardwareBuffer failed.");
+            priv->imported = true;
+            priv->flipped = modifier == AHARDWAREBUFFER_FLIPPED_SOCKET_FD;
+        }
     }
 
     return pixmap;
 
     fail:
+    if (buffer) {
+        AHardwareBuffer_release(buffer);
+    }
     if (pixmap)
         screen->DestroyPixmap(pixmap);
 

@@ -171,8 +171,6 @@ int rendererInitThread(JavaVM *vm) {
 
     (*vm)->AttachCurrentThread(vm, &env, NULL);
 
-    epoxy_set_resolver_failure_handler(eglGetProcAddress);
-
     egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (egl_display == EGL_NO_DISPLAY)
         return printEglError("Got no EGL display", __LINE__);
@@ -272,11 +270,18 @@ void rendererTestCapabilities(int* legacy_drawing, uint8_t* flip) {
             .format = AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
     };
 
+    epoxy_set_resolver_failure_handler(eglGetProcAddress);
+
     if (egl_display == EGL_NO_DISPLAY) {
         egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
         if (egl_display == EGL_NO_DISPLAY)
             return vprintEglError("Got no EGL display", __LINE__);
     }
+
+    if (eglInitialize(egl_display, NULL, NULL) != EGL_TRUE)
+        return vprintEglError("Unable to initialize EGL", __LINE__);
+
+    eglBindAPI(EGL_OPENGL_ES_API);
 
     status = AHardwareBuffer_allocate(&d0, &new);
     if (status != 0 || new == NULL) {
