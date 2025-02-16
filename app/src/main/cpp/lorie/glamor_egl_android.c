@@ -17,6 +17,7 @@ struct glamor_egl_pixmap_private {
    EGLImageKHR egl_image_khr;
    LorieBuffer *lorie_buffer;
    AHardwareBuffer *ahardware_buffer;
+   GLuint gl_memory_object_ext;
 };
 
 DevPrivateKeyRec glamor_egl_screen_private_key;
@@ -50,17 +51,24 @@ glamor_egl_release_pixmap_private(PixmapPtr pixmap)
 {
    struct glamor_egl_screen_private *glamor_egl_priv =
       glamor_egl_get_screen_private(pixmap->drawable.pScreen);
+   struct glamor_screen_private *glamor_priv =
+      glamor_get_screen_private(pixmap->drawable.pScreen);
    struct glamor_egl_pixmap_private *pixmap_priv =
       glamor_egl_get_pixmap_private(pixmap);
-   if (pixmap_priv->egl_image_khr != EGL_NO_IMAGE_KHR) {
+
+   glamor_make_current(glamor_priv);
+
+   if (pixmap_priv->gl_memory_object_ext) {
+      glDeleteMemoryObjectsEXT(1, &pixmap_priv->gl_memory_object_ext);
+   }
+   if (pixmap_priv->egl_image_khr) {
       eglDestroyImageKHR(
          glamor_egl_priv->display, pixmap_priv->egl_image_khr);
    }
-   if (pixmap_priv->lorie_buffer != NULL) {
+   if (pixmap_priv->lorie_buffer) {
       lorieUnregisterBuffer(pixmap_priv->lorie_buffer);
       LorieBuffer_release(pixmap_priv->lorie_buffer);
-   }
-   if (pixmap_priv->ahardware_buffer != NULL) {
+   } else if (pixmap_priv->ahardware_buffer) {
       AHardwareBuffer_release(pixmap_priv->ahardware_buffer);
    }
 }
@@ -136,6 +144,74 @@ glamor_egl_create_pixmap_from_ahardware_buffer(
    return pixmap;
 }
 
+static inline int
+os_dupfd_cloexec(int fd)
+{
+    int newfd;
+
+#ifdef F_DUPFD_CLOEXEC
+    newfd = fcntl(fd, F_DUPFD_CLOEXEC, MAXCLIENTS);
+#else
+    newfd = fcntl(fd, F_DUPFD, MAXCLIENTS);
+#endif
+    if (newfd < 0)
+        return fd;
+#ifndef F_DUPFD_CLOEXEC
+    fcntl(newfd, F_SETFD, FD_CLOEXEC);
+#endif
+    return newfd;
+}
+
+PixmapPtr
+glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int w, int h,
+   int depth, size_t size, uint32_t offset, int fd)
+{
+   struct glamor_screen_private *glamor_priv =
+      glamor_get_screen_private(screen);
+
+   PixmapPtr pixmap = glamor_create_pixmap(
+      screen, w, h, depth, GLAMOR_CREATE_PIXMAP_NO_TEXTURE);
+   if (!pixmap)
+      return NullPixmap;
+
+   struct glamor_egl_pixmap_private *pixmap_priv =
+      glamor_egl_get_pixmap_private(pixmap);
+
+   /* The GL implementation will take ownership of the fd */
+   int opaque_fd = os_dupfd_cloexec(fd);
+   if (opaque_fd < 0)
+      goto fail_fd;
+
+   glamor_make_current(glamor_priv);
+
+   glCreateMemoryObjectsEXT(1, &pixmap_priv->gl_memory_object_ext);
+   glImportMemoryFdEXT(pixmap_priv->gl_memory_object_ext, size,
+      GL_HANDLE_TYPE_OPAQUE_FD_EXT, opaque_fd);
+
+   if (!glIsMemoryObjectEXT(pixmap_priv->gl_memory_object_ext))
+      goto fail_obj;
+
+   uint32_t texture;
+   glGenTextures(1, &texture);
+   glBindTexture(GL_TEXTURE_2D, texture);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+   glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, GL_BGRA8_EXT, w, h,
+      pixmap_priv->gl_memory_object_ext, offset);
+   glBindTexture(GL_TEXTURE_2D, 0);
+
+   glamor_set_pixmap_type(pixmap, GLAMOR_TEXTURE_ONLY);
+   glamor_set_pixmap_texture(pixmap, texture);
+   return pixmap;
+
+fail_obj:
+   glDeleteMemoryObjectsEXT(1, &pixmap_priv->gl_memory_object_ext);
+fail_fd:
+   glamor_destroy_pixmap(pixmap);
+   return NullPixmap;
+}
+
 PixmapPtr
 glamor_egl_create_pixmap(
    ScreenPtr screen, int w, int h, int depth, unsigned int usage)
@@ -145,7 +221,7 @@ glamor_egl_create_pixmap(
    struct glamor_screen_private *glamor_priv =
       glamor_get_screen_private(screen);
 
-   if (usage != CREATE_PIXMAP_USAGE_LORIEBUFFER_BACKED)
+   if (usage != CREATE_PIXMAP_USAGE_LORIEBUFFER_BACKED || depth < 24)
       return glamor_egl_priv->CreatePixmap(screen, w, h, depth, usage);
 
    PixmapPtr pixmap = glamor_create_pixmap(
@@ -153,19 +229,22 @@ glamor_egl_create_pixmap(
    if (!pixmap)
       return NullPixmap;
 
-   LorieBuffer *lorie_buffer = LorieBuffer_allocate(w, h,
+   struct glamor_egl_pixmap_private *pixmap_priv =
+      glamor_egl_get_pixmap_private(pixmap);
+
+   pixmap_priv->lorie_buffer = LorieBuffer_allocate(w, h,
       AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, LORIEBUFFER_AHARDWAREBUFFER);
-   if (!lorie_buffer) {
+   if (!pixmap_priv->lorie_buffer) {
       glamor_destroy_pixmap(pixmap);
       return NullPixmap;
    }
 
    glamor_make_current(glamor_priv);
 
-   LorieBuffer_attachToGL(lorie_buffer);
+   LorieBuffer_attachToGL(pixmap_priv->lorie_buffer);
+   GLuint texture = LorieBuffer_getGLTexture(pixmap_priv->lorie_buffer);
    glamor_set_pixmap_type(pixmap, GLAMOR_TEXTURE_ONLY);
-   glamor_set_pixmap_texture(pixmap, LorieBuffer_getGLTexture(lorie_buffer));
-   glamor_egl_get_pixmap_private(pixmap)->lorie_buffer = lorie_buffer;
+   glamor_set_pixmap_texture(pixmap, texture);
    return pixmap;
 }
 
@@ -313,5 +392,6 @@ glamor_egl_get_pixmap_lorie_buffer(PixmapPtr pixmap)
 {
    struct glamor_egl_pixmap_private *pixmap_priv =
       glamor_egl_get_pixmap_private(pixmap);
+   assert(pixmap_priv->lorie_buffer);
    return pixmap_priv->lorie_buffer;
 }
