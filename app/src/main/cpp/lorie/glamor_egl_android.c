@@ -261,11 +261,13 @@ glamor_egl_close_screen(ScreenPtr screen)
    PixmapPtr screen_pixmap = screen->GetScreenPixmap(screen);
    glamor_egl_release_pixmap_private(screen_pixmap);
 
+   Bool ret = screen->CloseScreen(screen);
+
    eglDestroyContext(glamor_egl_priv->display, glamor_egl_priv->context);
    eglTerminate(glamor_egl_priv->display);
 
    free(glamor_egl_priv);
-   return screen->CloseScreen(screen);
+   return ret;
 }
 
 Bool
