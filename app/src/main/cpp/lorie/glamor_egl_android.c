@@ -221,7 +221,7 @@ glamor_egl_create_pixmap(
    struct glamor_screen_private *glamor_priv =
       glamor_get_screen_private(screen);
 
-   if (usage != CREATE_PIXMAP_USAGE_LORIEBUFFER_BACKED || depth < 24)
+   if (w == 0 || h == 0 || depth < 24)
       return glamor_egl_priv->CreatePixmap(screen, w, h, depth, usage);
 
    PixmapPtr pixmap = glamor_create_pixmap(
@@ -379,7 +379,27 @@ int
 glamor_egl_fds_from_pixmap(ScreenPtr screen, PixmapPtr pixmap, int *fds,
    uint32_t *offsets, uint32_t *strides, uint64_t *modifier)
 {
-   return 0;
+   struct glamor_egl_pixmap_private *pixmap_priv =
+      glamor_egl_get_pixmap_private(pixmap);
+
+   AHardwareBuffer *ahardware_buffer = NULL;
+   if (pixmap_priv->ahardware_buffer) {
+      ahardware_buffer = pixmap_priv->ahardware_buffer;
+   } else if (pixmap_priv->lorie_buffer) {
+      const LorieBuffer_Desc *desc =
+         LorieBuffer_description(pixmap_priv->lorie_buffer);
+      ahardware_buffer = desc->buffer;
+   }
+
+   if (!ahardware_buffer)
+      return 0;
+
+   if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0)
+      return 0;
+
+   AHardwareBuffer_sendHandleToUnixSocket(ahardware_buffer, fds[1]);
+   *modifier = 0;
+   return 1;
 }
 
 int
