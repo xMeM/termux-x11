@@ -31,6 +31,7 @@
 #include "present_priv.h"
 #include "misyncshm.h"
 #include "glamor.h"
+#include "glamor_egl.h"
 #include "glamor_egl_android.h"
 #include "glxserver.h"
 #include "glxutil.h"
@@ -1049,11 +1050,11 @@ static int lorieGetModifiers(__unused ScreenPtr screen, __unused uint32_t format
 
 static dri3_screen_info_rec lorieDri3Info = {
         .version = 2,
-        .fds_from_pixmap = FalseNoop,
         .pixmap_from_fds = loriePixmapFromFds,
+        .fds_from_pixmap = glamor_egl_fds_from_pixmap,
         .get_formats = lorieGetFormats,
         .get_modifiers = lorieGetModifiers,
-        .get_drawable_modifiers = FalseNoop
+        .get_drawable_modifiers = FalseNoop,
 };
 
 static GLboolean drawableSwapBuffers(unused ClientPtr client, unused __GLXdrawable * drawable) { return TRUE; }
