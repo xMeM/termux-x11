@@ -781,6 +781,9 @@ static void loriePerformVblanks(void) {
 }
 
 Bool loriePresentCheckFlip(__unused RRCrtcPtr crtc, WindowPtr window, PixmapPtr pixmap, __unused Bool sync_flip) {
+    if (pvfb->glamor)
+        return FALSE;
+
     LoriePixmapPriv* priv = (LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap);
     if (!priv || !priv->buffer || priv->mem)
         return FALSE;
