@@ -221,7 +221,6 @@ static uint32_t
 glamor_egl_depth_format(int depth)
 {
    switch (depth) {
-   case 15:
    case 16:
       return AHARDWAREBUFFER_FORMAT_R5G6B5_UNORM;
    case 24:
@@ -297,6 +296,8 @@ Bool
 glamor_egl_init(ScreenPtr screen)
 {
    struct glamor_egl_screen_private *glamor_egl_priv;
+   EGLConfig egl_config;
+   int num_egl_config;
 
    glamor_egl_priv = calloc(1, sizeof(*glamor_egl_priv));
    if (!glamor_egl_priv)
@@ -311,8 +312,41 @@ glamor_egl_init(ScreenPtr screen)
           sizeof(struct glamor_egl_pixmap_private)))
       FatalError("glamor_egl: Failed to allocate pixmap private\n");
 
+   glamor_egl_priv->display =
+      glamor_egl_get_display(EGL_PLATFORM_ANDROID_KHR, EGL_DEFAULT_DISPLAY);
+
+   if (!glamor_egl_priv->display)
+      FatalError("eglGetDisplay() failed\n");
+
+   if (!eglInitialize(glamor_egl_priv->display, NULL, NULL))
+      FatalError("eglInitialize() failed\n");
+
+   if (!epoxy_has_gl_extension("EGL_KHR_surfaceless_context") &&
+       epoxy_egl_version(glamor_egl_priv->display) < 15)
+      FatalError("glamor_egl: glamor requires EGL_KHR_surfaceless_context\n");
+
+   if (!eglBindAPI(EGL_OPENGL_ES_API))
+      FatalError("glamor_egl: Failed to bind either GLES APIs.\n");
+
+   if (!eglChooseConfig(
+          glamor_egl_priv->display, NULL, &egl_config, 1, &num_egl_config))
+      FatalError("glamor_egl: No acceptable EGL configs found\n");
+
+   static const EGLint context_attribs[] = {
+      EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+
+   glamor_egl_priv->context = eglCreateContext(
+      glamor_egl_priv->display, egl_config, EGL_NO_CONTEXT, context_attribs);
+
+   if (glamor_egl_priv->context == EGL_NO_CONTEXT)
+      FatalError("glamor_egl: Failed to create GLES2 contexts\n");
+
+   if (!eglMakeCurrent(glamor_egl_priv->display, EGL_NO_SURFACE,
+          EGL_NO_SURFACE, glamor_egl_priv->context))
+      FatalError("glamor_egl: Failed to make GLES2 context current\n");
+
    if (!glamor_init(screen, GLAMOR_USE_EGL_SCREEN))
-      return FALSE;
+      FatalError("glamor_egl: glamor_init failed\n");
 
    glamor_egl_priv->CreatePixmap = screen->CreatePixmap;
    screen->CreatePixmap = glamor_egl_create_pixmap;
@@ -351,43 +385,10 @@ glamor_egl_screen_init(ScreenPtr screen, struct glamor_context *glamor_ctx)
 {
    struct glamor_egl_screen_private *glamor_egl_priv =
       glamor_egl_get_screen_private(screen);
-   EGLConfig egl_config;
-   int num_egl_config;
-
-   glamor_egl_priv->display =
-      glamor_egl_get_display(EGL_PLATFORM_ANDROID_KHR, EGL_DEFAULT_DISPLAY);
-
-   if (!glamor_egl_priv->display)
-      FatalError("eglGetDisplay() failed\n");
-
-   if (!eglInitialize(glamor_egl_priv->display, NULL, NULL))
-      FatalError("eglInitialize() failed\n");
-
-   if (!epoxy_has_gl_extension("EGL_KHR_surfaceless_context") &&
-       epoxy_egl_version(glamor_egl_priv->display) < 15)
-      FatalError("glamor_egl: glamor requires EGL_KHR_surfaceless_context\n");
-
-   if (!eglBindAPI(EGL_OPENGL_ES_API))
-      FatalError("glamor_egl: Failed to bind either GLES APIs.\n");
-
-   if (!eglChooseConfig(
-          glamor_egl_priv->display, NULL, &egl_config, 1, &num_egl_config))
-      FatalError("glamor_egl: No acceptable EGL configs found\n");
-
-   static const EGLint context_attribs[] = {
-      EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
-
-   glamor_egl_priv->context = eglCreateContext(
-      glamor_egl_priv->display, egl_config, EGL_NO_CONTEXT, context_attribs);
-
-   if (glamor_egl_priv->context == EGL_NO_CONTEXT)
-      FatalError("glamor_egl: Failed to create GLES2 contexts\n");
-
-   if (!eglMakeCurrent(glamor_egl_priv->display, EGL_NO_SURFACE,
-          EGL_NO_SURFACE, glamor_egl_priv->context))
-      FatalError("glamor_egl: Failed to make GLES2 context current\n");
 
    glamor_enable_dri3(screen);
+   glamor_ctx->display = glamor_egl_priv->display;
+   glamor_ctx->ctx = glamor_egl_priv->context;
    glamor_ctx->make_current = glamor_egl_make_current;
 }
 
@@ -457,7 +458,8 @@ glamor_egl_fds_from_pixmap(ScreenPtr screen, PixmapPtr pixmap, int *fds,
       close(pixmap_priv->socket_fd);
 
    pixmap_priv->socket_fd = socketpair_fds[1];
-   AHardwareBuffer_sendHandleToUnixSocket(ahardware_buffer, socketpair_fds[1]);
+   AHardwareBuffer_sendHandleToUnixSocket(
+      ahardware_buffer, socketpair_fds[1]);
    offsets[0] = 0, strides[0] = 0, modifier[0] = 0;
    fds[0] = socketpair_fds[0];
    return 1;
