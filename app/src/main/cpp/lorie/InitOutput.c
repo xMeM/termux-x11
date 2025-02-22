@@ -970,14 +970,13 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
     const CARD64 AHARDWAREBUFFER_SOCKET_FD = 1255;
     const CARD64 AHARDWAREBUFFER_FLIPPED_SOCKET_FD = 1256;
     const CARD64 RAW_MMAPPABLE_FD = 1274;
-    const CARD64 VULKAN_OPAQUE_FD = 1286;
     PixmapPtr pixmap = NullPixmap;
     LoriePixmapPriv *priv = NULL;
     LorieBuffer *lb = NULL;
 
     check(num_fds > 1, "DRI3: More than 1 fd");
     check(modifier != RAW_MMAPPABLE_FD && modifier != AHARDWAREBUFFER_SOCKET_FD && modifier != AHARDWAREBUFFER_FLIPPED_SOCKET_FD &&
-          modifier != DRM_FORMAT_MOD_INVALID && modifier != VULKAN_OPAQUE_FD, "DRI3: Modifier is not RAW_MMAPPABLE_FD or AHARDWAREBUFFER_SOCKET_FD");
+          modifier != DRM_FORMAT_MOD_INVALID && modifier != DRM_FORMAT_MOD_LINEAR, "DRI3: Modifier is not RAW_MMAPPABLE_FD or AHARDWAREBUFFER_SOCKET_FD");
 
     if (modifier == DRM_FORMAT_MOD_INVALID || modifier == RAW_MMAPPABLE_FD) {
         pixmap = screen->CreatePixmap(screen, 0, 0, depth, 0);
@@ -986,7 +985,7 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
         screen->ModifyPixmapHeader(pixmap, width, height, 0, 0, strides[0], NULL);
         priv->imported = true;
         return pixmap;
-    } else if (modifier == VULKAN_OPAQUE_FD && pvfb->glamor) {
+    } else if (modifier == DRM_FORMAT_MOD_LINEAR && pvfb->glamor) {
         pixmap = glamor_egl_create_pixmap_from_opaque_fd(screen, width, height, depth, strides[0] * height, offsets[0], fds[0]);
         check(!pixmap, "DRI3: failed to create pixmap from opaque fd");
     } else if (modifier == AHARDWAREBUFFER_SOCKET_FD || modifier == AHARDWAREBUFFER_FLIPPED_SOCKET_FD) {

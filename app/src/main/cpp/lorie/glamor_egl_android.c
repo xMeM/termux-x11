@@ -1,5 +1,6 @@
 #include "glamor_egl_android.h"
 #include "buffer.h"
+#include "drm_fourcc.h"
 #include "glamor.h"
 #include "glamor_egl.h"
 #include "glamor_priv.h"
@@ -481,7 +482,7 @@ glamor_egl_fds_from_pixmap(ScreenPtr screen, PixmapPtr pixmap, int *fds,
    fds[0] = fcntl(vk_shm_bo_fd(pixmap_priv->bo), F_DUPFD_CLOEXEC, 0);
    strides[0] = vk_shm_bo_stride(pixmap_priv->bo);
    offsets[0] = vk_shm_bo_offset(pixmap_priv->bo);
-   modifier[0] = 0; /* DRM_FORMAT_MOD_LINEAR */
+   modifier[0] = DRM_FORMAT_MOD_LINEAR;
    return 1;
 }
 

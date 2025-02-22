@@ -97,6 +97,7 @@ file(GENERATE
     #define DRM_FORMAT_XRGB2101010	fourcc_code('X', 'R', '3', '0')
     #define DRM_FORMAT_ARGB8888	fourcc_code('A', 'R', '2', '4')
     #define DRM_FORMAT_MOD_INVALID -1
+    #define DRM_FORMAT_MOD_LINEAR 0
 ")
 add_library(xserver_dri3 STATIC
         "xserver/dri3/dri3.c"
