@@ -3,10 +3,13 @@
 #include "glamor.h"
 #include "glamor_egl.h"
 #include "glamor_priv.h"
+#include "vulkan_shm.h"
 
 struct glamor_egl_screen_private {
    EGLDisplay display;
    EGLContext context;
+
+   struct vk_shm_allocator *allocator;
 
    CloseScreenProcPtr CloseScreen;
    CreatePixmapProcPtr CreatePixmap;
@@ -19,7 +22,7 @@ struct glamor_egl_pixmap_private {
    AHardwareBuffer *ahardware_buffer;
    GLuint gl_memory_object_ext;
 
-   int socket_fd;
+   struct vk_shm_bo *bo;
 };
 
 DevPrivateKeyRec glamor_egl_screen_private_key;
@@ -49,6 +52,15 @@ glamor_egl_get_pixmap_private(PixmapPtr pixmap)
 }
 
 static void
+glamor_egl_set_pixmap_bo(PixmapPtr pixmap, struct vk_shm_bo *bo)
+{
+   struct glamor_egl_pixmap_private *pixmap_priv =
+      glamor_egl_get_pixmap_private(pixmap);
+
+   pixmap_priv->bo = bo;
+}
+
+static void
 glamor_egl_release_pixmap_private(PixmapPtr pixmap)
 {
    struct glamor_egl_screen_private *glamor_egl_priv =
@@ -73,8 +85,8 @@ glamor_egl_release_pixmap_private(PixmapPtr pixmap)
    } else if (pixmap_priv->ahardware_buffer) {
       AHardwareBuffer_release(pixmap_priv->ahardware_buffer);
    }
-   if (pixmap_priv->socket_fd > 0) {
-      close(pixmap_priv->socket_fd);
+   if (pixmap_priv->bo) {
+      vk_shm_bo_destroy(pixmap_priv->bo);
    }
 }
 
@@ -149,22 +161,30 @@ glamor_egl_create_pixmap_from_ahardware_buffer(
    return pixmap;
 }
 
-static inline int
-os_dupfd_cloexec(int fd)
+PixmapPtr
+glamor_egl_create_pixmap_from_lorie_buffer(
+   ScreenPtr screen, int depth, LorieBuffer *lorie_buffer)
 {
-   int newfd;
+   struct glamor_screen_private *glamor_priv =
+      glamor_get_screen_private(screen);
+   struct glamor_egl_pixmap_private *pixmap_priv;
 
-#ifdef F_DUPFD_CLOEXEC
-   newfd = fcntl(fd, F_DUPFD_CLOEXEC, MAXCLIENTS);
-#else
-   newfd = fcntl(fd, F_DUPFD, MAXCLIENTS);
-#endif
-   if (newfd < 0)
-      return fd;
-#ifndef F_DUPFD_CLOEXEC
-   fcntl(newfd, F_SETFD, FD_CLOEXEC);
-#endif
-   return newfd;
+   const LorieBuffer_Desc *desc = LorieBuffer_description(lorie_buffer);
+   PixmapPtr pixmap = glamor_create_pixmap(screen, desc->width, desc->height,
+      depth, GLAMOR_CREATE_PIXMAP_NO_TEXTURE);
+   if (!pixmap)
+      return NullPixmap;
+
+   pixmap_priv = glamor_egl_get_pixmap_private(pixmap);
+   pixmap_priv->lorie_buffer = lorie_buffer;
+
+   glamor_make_current(glamor_priv);
+
+   LorieBuffer_attachToGL(pixmap_priv->lorie_buffer);
+   GLuint texture = LorieBuffer_getGLTexture(pixmap_priv->lorie_buffer);
+   glamor_set_pixmap_type(pixmap, GLAMOR_TEXTURE_ONLY);
+   glamor_set_pixmap_texture(pixmap, texture);
+   return pixmap;
 }
 
 PixmapPtr
@@ -183,9 +203,9 @@ glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int w, int h,
       glamor_egl_get_pixmap_private(pixmap);
 
    /* The GL implementation will take ownership of the fd */
-   int opaque_fd = os_dupfd_cloexec(fd);
+   int opaque_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
    if (opaque_fd < 0)
-      goto fail_fd;
+      goto fail;
 
    glamor_make_current(glamor_priv);
 
@@ -194,7 +214,7 @@ glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int w, int h,
       GL_HANDLE_TYPE_OPAQUE_FD_EXT, opaque_fd);
 
    if (!glIsMemoryObjectEXT(pixmap_priv->gl_memory_object_ext))
-      goto fail_obj;
+      goto fail;
 
    uint32_t texture;
    glGenTextures(1, &texture);
@@ -202,7 +222,8 @@ glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int w, int h,
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-   glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, GL_BGRA8_EXT, w, h,
+   glTexStorageMem2DEXT(GL_TEXTURE_2D, 1,
+      glamor_priv->formats[depth].internalformat, w, h,
       pixmap_priv->gl_memory_object_ext, offset);
    glBindTexture(GL_TEXTURE_2D, 0);
 
@@ -210,9 +231,8 @@ glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int w, int h,
    glamor_set_pixmap_texture(pixmap, texture);
    return pixmap;
 
-fail_obj:
-   glDeleteMemoryObjectsEXT(1, &pixmap_priv->gl_memory_object_ext);
-fail_fd:
+fail:
+   glamor_egl_release_pixmap_private(pixmap);
    glamor_destroy_pixmap(pixmap);
    return NullPixmap;
 }
@@ -234,6 +254,57 @@ glamor_egl_depth_format(int depth)
    }
 }
 
+static VkFormat
+glamor_egl_depth_format_vk(int depth)
+{
+   switch (depth) {
+   case 1:
+   case 8:
+      return VK_FORMAT_R8_UNORM;
+   case 15:
+      return VK_FORMAT_R5G5B5A1_UNORM_PACK16;
+   case 16:
+      return VK_FORMAT_R5G6B5_UNORM_PACK16;
+   case 24:
+   case 32:
+      return VK_FORMAT_B8G8R8A8_UNORM;
+   case 30:
+      return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+
+   default:
+      FatalError("depth %d no supported vulkan format\n", depth);
+   }
+}
+
+static PixmapPtr
+glamor_egl_create_pixmap_from_shm_bo(
+   ScreenPtr screen, int w, int h, int depth, struct vk_shm_bo *bo)
+{
+   PixmapPtr pixmap = glamor_egl_create_pixmap_from_opaque_fd(screen, w, h,
+      depth, vk_shm_bo_size(bo), vk_shm_bo_offset(bo), vk_shm_bo_fd(bo));
+   if (pixmap)
+      glamor_egl_set_pixmap_bo(pixmap, bo);
+   return pixmap;
+}
+
+static PixmapPtr
+glamor_egl_create_screen_pixmap(ScreenPtr screen, int w, int h, int depth)
+{
+   LorieBuffer *lorie_buffer;
+   PixmapPtr pixmap;
+
+   lorie_buffer = LorieBuffer_allocate(
+      w, h, glamor_egl_depth_format(depth), LORIEBUFFER_AHARDWAREBUFFER);
+   if (!lorie_buffer)
+      return NullPixmap;
+
+   pixmap =
+      glamor_egl_create_pixmap_from_lorie_buffer(screen, depth, lorie_buffer);
+   if (!pixmap)
+      LorieBuffer_release(lorie_buffer);
+   return pixmap;
+}
+
 PixmapPtr
 glamor_egl_create_pixmap(
    ScreenPtr screen, int w, int h, int depth, unsigned int usage)
@@ -243,30 +314,26 @@ glamor_egl_create_pixmap(
    struct glamor_screen_private *glamor_priv =
       glamor_get_screen_private(screen);
 
-   if (usage != CREATE_PIXMAP_USAGE_LORIEBUFFER_BACKED)
-      return glamor_egl_priv->CreatePixmap(screen, w, h, depth, usage);
+   if (usage == CREATE_PIXMAP_USAGE_LORIEBUFFER_BACKED)
+      return glamor_egl_create_screen_pixmap(screen, w, h, depth);
 
-   PixmapPtr pixmap = glamor_create_pixmap(
-      screen, w, h, depth, GLAMOR_CREATE_PIXMAP_NO_TEXTURE);
+   PixmapPtr pixmap = glamor_create_pixmap(screen, w, h, depth, usage);
    if (!pixmap)
-      return NullPixmap;
+      return fbCreatePixmap(screen, w, h, depth, usage);
 
-   struct glamor_egl_pixmap_private *pixmap_priv =
-      glamor_egl_get_pixmap_private(pixmap);
+   if (glamor_pixmap_has_fbo(pixmap)) {
+      struct vk_shm_bo *bo = vk_shm_bo_create(glamor_egl_priv->allocator, w,
+         h, glamor_egl_depth_format_vk(depth), true);
+      if (!bo)
+         return pixmap;
 
-   pixmap_priv->lorie_buffer = LorieBuffer_allocate(
-      w, h, glamor_egl_depth_format(depth), LORIEBUFFER_AHARDWAREBUFFER);
-   if (!pixmap_priv->lorie_buffer) {
       glamor_destroy_pixmap(pixmap);
-      return NullPixmap;
+      pixmap = glamor_egl_create_pixmap_from_shm_bo(screen, w, h, depth, bo);
+      if (!pixmap) {
+         vk_shm_bo_destroy(bo);
+         return fbCreatePixmap(screen, w, h, depth, usage);
+      }
    }
-
-   glamor_make_current(glamor_priv);
-
-   LorieBuffer_attachToGL(pixmap_priv->lorie_buffer);
-   GLuint texture = LorieBuffer_getGLTexture(pixmap_priv->lorie_buffer);
-   glamor_set_pixmap_type(pixmap, GLAMOR_TEXTURE_ONLY);
-   glamor_set_pixmap_texture(pixmap, texture);
    return pixmap;
 }
 
@@ -288,6 +355,7 @@ glamor_egl_close_screen(ScreenPtr screen)
    eglDestroyContext(glamor_egl_priv->display, glamor_egl_priv->context);
    eglTerminate(glamor_egl_priv->display);
 
+   vk_shm_allocator_destroy(glamor_egl_priv->allocator);
    free(glamor_egl_priv);
    return ret;
 }
@@ -296,8 +364,6 @@ Bool
 glamor_egl_init(ScreenPtr screen)
 {
    struct glamor_egl_screen_private *glamor_egl_priv;
-   EGLConfig egl_config;
-   int num_egl_config;
 
    glamor_egl_priv = calloc(1, sizeof(*glamor_egl_priv));
    if (!glamor_egl_priv)
@@ -328,15 +394,11 @@ glamor_egl_init(ScreenPtr screen)
    if (!eglBindAPI(EGL_OPENGL_ES_API))
       FatalError("glamor_egl: Failed to bind either GLES APIs.\n");
 
-   if (!eglChooseConfig(
-          glamor_egl_priv->display, NULL, &egl_config, 1, &num_egl_config))
-      FatalError("glamor_egl: No acceptable EGL configs found\n");
-
    static const EGLint context_attribs[] = {
       EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
 
-   glamor_egl_priv->context = eglCreateContext(
-      glamor_egl_priv->display, egl_config, EGL_NO_CONTEXT, context_attribs);
+   glamor_egl_priv->context = eglCreateContext(glamor_egl_priv->display,
+      EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, context_attribs);
 
    if (glamor_egl_priv->context == EGL_NO_CONTEXT)
       FatalError("glamor_egl: Failed to create GLES2 contexts\n");
@@ -347,6 +409,10 @@ glamor_egl_init(ScreenPtr screen)
 
    if (!glamor_init(screen, GLAMOR_USE_EGL_SCREEN))
       FatalError("glamor_egl: glamor_init failed\n");
+
+   glamor_egl_priv->allocator = vk_shm_allocator_create();
+   if (!glamor_egl_priv->allocator)
+      FatalError("glamor_egl: Failed to create vulkan memory allocator\n");
 
    glamor_egl_priv->CreatePixmap = screen->CreatePixmap;
    screen->CreatePixmap = glamor_egl_create_pixmap;
@@ -406,62 +472,16 @@ glamor_egl_fds_from_pixmap(ScreenPtr screen, PixmapPtr pixmap, int *fds,
    struct glamor_egl_pixmap_private *pixmap_priv =
       glamor_egl_get_pixmap_private(pixmap);
 
-   AHardwareBuffer *ahardware_buffer = NULL;
-   if (pixmap_priv->ahardware_buffer) {
-      ahardware_buffer = pixmap_priv->ahardware_buffer;
-   } else if (pixmap_priv->lorie_buffer) {
-      const LorieBuffer_Desc *desc =
-         LorieBuffer_description(pixmap_priv->lorie_buffer);
-      ahardware_buffer = desc->buffer;
-   }
-
-   if (!ahardware_buffer) {
-      AHardwareBuffer_Desc desc = {
-         .width = pixmap->drawable.width,
-         .height = pixmap->drawable.height,
-         .format = glamor_egl_depth_format(pixmap->drawable.depth),
-         .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-                  AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER,
-         .layers = 1,
-         .rfu0 = 0,
-         .rfu1 = 0,
-      };
-      AHardwareBuffer_allocate(&desc, &ahardware_buffer);
-      if (!ahardware_buffer)
-         return 0;
-
-      PixmapPtr temp_pixmap = glamor_egl_create_pixmap_from_ahardware_buffer(
-         screen, pixmap->drawable.depth, ahardware_buffer);
-      if (!temp_pixmap) {
-         AHardwareBuffer_release(ahardware_buffer);
-         return 0;
-      }
-
-      GCPtr pGC = GetScratchGC(temp_pixmap->drawable.depth, screen);
-      ValidateGC(&temp_pixmap->drawable, pGC);
-      pGC->ops->CopyArea(&pixmap->drawable, &temp_pixmap->drawable, pGC, 0, 0,
-         pixmap->drawable.width, pixmap->drawable.height, 0, 0);
-      FreeScratchGC(pGC);
-
-      glamor_pixmap_exchange_fbos(pixmap, temp_pixmap);
-      glamor_egl_exchange_buffers(pixmap, temp_pixmap);
-      glamor_finish(screen);
-
-      glamor_destroy_pixmap(temp_pixmap);
-   }
-
-   int socketpair_fds[2];
-   if (socketpair(AF_UNIX, SOCK_STREAM, 0, socketpair_fds) < 0)
+   if (!pixmap_priv->bo) {
+      ErrorF("glamor_egl: %s failed depth %d\n", __func__,
+         pixmap->drawable.depth);
       return 0;
+   }
 
-   if (pixmap_priv->socket_fd > 0)
-      close(pixmap_priv->socket_fd);
-
-   pixmap_priv->socket_fd = socketpair_fds[1];
-   AHardwareBuffer_sendHandleToUnixSocket(
-      ahardware_buffer, socketpair_fds[1]);
-   offsets[0] = 0, strides[0] = 0, modifier[0] = 0;
-   fds[0] = socketpair_fds[0];
+   fds[0] = fcntl(vk_shm_bo_fd(pixmap_priv->bo), F_DUPFD_CLOEXEC, 0);
+   strides[0] = vk_shm_bo_stride(pixmap_priv->bo);
+   offsets[0] = vk_shm_bo_offset(pixmap_priv->bo);
+   modifier[0] = 0; /* DRM_FORMAT_MOD_LINEAR */
    return 1;
 }
 
@@ -469,7 +489,18 @@ int
 glamor_egl_fd_from_pixmap(
    ScreenPtr screen, PixmapPtr pixmap, CARD16 *stride, CARD32 *size)
 {
-   return -1;
+   struct glamor_egl_pixmap_private *pixmap_priv =
+      glamor_egl_get_pixmap_private(pixmap);
+
+   if (!pixmap_priv->bo) {
+      ErrorF("glamor_egl: %s failed depth %d\n", __func__,
+         pixmap->drawable.depth);
+      return -1;
+   }
+
+   *stride = vk_shm_bo_stride(pixmap_priv->bo);
+   *size = vk_shm_bo_size(pixmap_priv->bo);
+   return fcntl(vk_shm_bo_fd(pixmap_priv->bo), F_DUPFD_CLOEXEC, 0);
 }
 
 LorieBuffer *
