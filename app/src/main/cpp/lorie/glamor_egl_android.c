@@ -259,9 +259,6 @@ static VkFormat
 glamor_egl_depth_format_vk(int depth)
 {
    switch (depth) {
-   case 1:
-   case 8:
-      return VK_FORMAT_R8_UNORM;
    case 15:
       return VK_FORMAT_R5G5B5A1_UNORM_PACK16;
    case 16:
@@ -278,11 +275,11 @@ glamor_egl_depth_format_vk(int depth)
 }
 
 static PixmapPtr
-glamor_egl_create_pixmap_from_shm_bo(
-   ScreenPtr screen, int w, int h, int depth, struct vk_shm_bo *bo)
+glamor_egl_create_pixmap_from_shm_bo(ScreenPtr screen, struct vk_shm_bo *bo)
 {
-   PixmapPtr pixmap = glamor_egl_create_pixmap_from_opaque_fd(screen, w, h,
-      depth, vk_shm_bo_size(bo), vk_shm_bo_offset(bo), vk_shm_bo_fd(bo));
+   PixmapPtr pixmap = glamor_egl_create_pixmap_from_opaque_fd(screen,
+      vk_shm_bo_width(bo), vk_shm_bo_height(bo), vk_shm_bo_depth(bo),
+      vk_shm_bo_size(bo), vk_shm_bo_offset(bo), vk_shm_bo_fd(bo));
    if (pixmap)
       glamor_egl_set_pixmap_bo(pixmap, bo);
    return pixmap;
@@ -322,18 +319,23 @@ glamor_egl_create_pixmap(
    if (!pixmap)
       return fbCreatePixmap(screen, w, h, depth, usage);
 
-   if (glamor_pixmap_has_fbo(pixmap)) {
-      struct vk_shm_bo *bo = vk_shm_bo_create(glamor_egl_priv->allocator, w,
-         h, glamor_egl_depth_format_vk(depth), true);
+   if (glamor_pixmap_has_fbo(pixmap) && depth >= 15) {
+      struct vk_shm_bo *bo;
+      PixmapPtr new_pixmap;
+
+      bo = vk_shm_bo_create(glamor_egl_priv->allocator, w, h, depth,
+         glamor_egl_depth_format_vk(depth), true);
       if (!bo)
          return pixmap;
 
-      glamor_destroy_pixmap(pixmap);
-      pixmap = glamor_egl_create_pixmap_from_shm_bo(screen, w, h, depth, bo);
-      if (!pixmap) {
+      new_pixmap = glamor_egl_create_pixmap_from_shm_bo(screen, bo);
+      if (!new_pixmap) {
          vk_shm_bo_destroy(bo);
-         return fbCreatePixmap(screen, w, h, depth, usage);
+         return pixmap;
       }
+
+      glamor_destroy_pixmap(pixmap);
+      return new_pixmap;
    }
    return pixmap;
 }
