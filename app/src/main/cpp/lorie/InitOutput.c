@@ -978,16 +978,22 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
     check(modifier != RAW_MMAPPABLE_FD && modifier != AHARDWAREBUFFER_SOCKET_FD && modifier != AHARDWAREBUFFER_FLIPPED_SOCKET_FD &&
           modifier != DRM_FORMAT_MOD_INVALID && modifier != DRM_FORMAT_MOD_LINEAR, "DRI3: Modifier is not RAW_MMAPPABLE_FD or AHARDWAREBUFFER_SOCKET_FD");
 
-    if (modifier == DRM_FORMAT_MOD_INVALID || modifier == RAW_MMAPPABLE_FD) {
-        pixmap = screen->CreatePixmap(screen, 0, 0, depth, 0);
-        check(!pixmap, "DRI3: failed to create pixmap");
-        check(!(priv->buffer = LorieBuffer_wrapFileDescriptor(width, strides[0]/4, height, AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, fds[0], offsets[0])), "DRI3: LorieBuffer_wrapAHardwareBuffer failed.");
-        screen->ModifyPixmapHeader(pixmap, width, height, 0, 0, strides[0], NULL);
-        priv->imported = true;
-        return pixmap;
-    } else if (modifier == DRM_FORMAT_MOD_LINEAR && pvfb->glamor) {
-        pixmap = glamor_egl_create_pixmap_from_opaque_fd(screen, width, height, depth, strides[0] * height, offsets[0], fds[0]);
-        check(!pixmap, "DRI3: failed to create pixmap from opaque fd");
+    if (modifier == DRM_FORMAT_MOD_INVALID || modifier == DRM_FORMAT_MOD_LINEAR || modifier == RAW_MMAPPABLE_FD) {
+        if (pvfb->glamor) {
+            if (modifier == DRM_FORMAT_MOD_LINEAR) {
+                pixmap = glamor_egl_create_pixmap_from_opaque_fd(screen, width, height, depth, strides[0] * height, offsets[0], fds[0]);
+                check(!pixmap, "DRI3: failed to create pixmap from opaque fd");
+            }
+        } else {
+            pixmap = screen->CreatePixmap(screen, 0, 0, depth, 0);
+            check(!pixmap, "DRI3: failed to create pixmap");
+            priv = exaGetPixmapDriverPrivate(pixmap);
+            check(!priv, "DRI3: failed to obtain pixmap private");
+            check(!(priv->buffer = LorieBuffer_wrapFileDescriptor(width, strides[0]/4, height, AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, fds[0], offsets[0])),
+                "DRI3: LorieBuffer_wrapAHardwareBuffer failed.");
+            screen->ModifyPixmapHeader(pixmap, width, height, 0, 0, strides[0], NULL);
+            priv->imported = true;
+        }
     } else if (modifier == AHARDWAREBUFFER_SOCKET_FD || modifier == AHARDWAREBUFFER_FLIPPED_SOCKET_FD) {
         AHardwareBuffer *buffer;
         AHardwareBuffer_Desc desc = {0};
