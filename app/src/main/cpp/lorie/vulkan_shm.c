@@ -22,6 +22,7 @@ struct vk_shm_bo {
    uint32_t offset;
    size_t size;
    int fd;
+   unsigned int width, height, depth;
    struct vk_shm_allocator *allocator;
 };
 
@@ -49,8 +50,8 @@ vk_shm_bo_destroy(struct vk_shm_bo *bo)
 
 static struct vk_shm_bo *
 vk_shm_bo_create_internal(struct vk_shm_allocator *allocator,
-   unsigned int width, unsigned int height, VkFormat format, bool linear,
-   int fd)
+   unsigned int width, unsigned int height, unsigned int depth,
+   VkFormat format, bool linear, int fd)
 {
    struct vk_shm_bo *bo;
    VkResult result;
@@ -61,6 +62,9 @@ vk_shm_bo_create_internal(struct vk_shm_allocator *allocator,
 
    bo->allocator = allocator;
    bo->fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+   bo->width = width;
+   bo->height = height;
+   bo->depth = depth;
 
    const VkExternalMemoryImageCreateInfo emici = {
       .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
@@ -172,21 +176,22 @@ fail:
 
 struct vk_shm_bo *
 vk_shm_bo_create(struct vk_shm_allocator *allocator, unsigned int width,
-   unsigned int height, VkFormat format, bool linear)
+   unsigned int height, unsigned int depth, VkFormat format, bool linear)
 {
    return vk_shm_bo_create_internal(
-      allocator, width, height, format, linear, -1);
+      allocator, width, height, depth, format, linear, -1);
 }
 
 struct vk_shm_bo *
 vk_shm_bo_import(struct vk_shm_allocator *allocator, unsigned int width,
-   unsigned int height, VkFormat format, bool linear, int fd)
+   unsigned int height, unsigned int depth, VkFormat format, bool linear,
+   int fd)
 {
    if (fd < 0)
       return NULL;
 
    return vk_shm_bo_create_internal(
-      allocator, width, height, format, linear, fd);
+      allocator, width, height, depth, format, linear, fd);
 }
 
 int
@@ -211,6 +216,24 @@ size_t
 vk_shm_bo_size(struct vk_shm_bo *bo)
 {
    return bo->size;
+}
+
+unsigned int
+vk_shm_bo_width(struct vk_shm_bo *bo)
+{
+   return bo->width;
+}
+
+unsigned int
+vk_shm_bo_height(struct vk_shm_bo *bo)
+{
+   return bo->height;
+}
+
+unsigned int
+vk_shm_bo_depth(struct vk_shm_bo *bo)
+{
+   return bo->depth;
 }
 
 void *
