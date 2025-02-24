@@ -20,7 +20,6 @@ struct glamor_egl_screen_private {
 struct glamor_egl_pixmap_private {
    EGLImageKHR egl_image_khr;
    LorieBuffer *lorie_buffer;
-   AHardwareBuffer *ahardware_buffer;
    GLuint gl_memory_object_ext;
 
    struct vk_shm_bo *bo;
@@ -34,13 +33,13 @@ DevPrivateKeyRec glamor_egl_pixmap_private_key;
 static struct glamor_egl_screen_private *
 glamor_egl_get_screen_private(ScreenPtr screen)
 {
-   return (struct glamor_egl_screen_private *)dixLookupPrivate(
-      &screen->devPrivates, &glamor_egl_screen_private_key);
+   return (struct glamor_egl_screen_private *)
+      dixLookupPrivate(&screen->devPrivates, &glamor_egl_screen_private_key);
 }
 
 static void
-glamor_egl_set_screen_private(
-   ScreenPtr screen, struct glamor_egl_screen_private *priv)
+glamor_egl_set_screen_private(ScreenPtr screen,
+                              struct glamor_egl_screen_private *priv)
 {
    dixSetPrivate(&screen->devPrivates, &glamor_egl_screen_private_key, priv);
 }
@@ -48,8 +47,8 @@ glamor_egl_set_screen_private(
 static struct glamor_egl_pixmap_private *
 glamor_egl_get_pixmap_private(PixmapPtr pixmap)
 {
-   return (struct glamor_egl_pixmap_private *)dixLookupPrivate(
-      &pixmap->devPrivates, &glamor_egl_pixmap_private_key);
+   return (struct glamor_egl_pixmap_private *)
+      dixLookupPrivate(&pixmap->devPrivates, &glamor_egl_pixmap_private_key);
 }
 
 static void
@@ -77,14 +76,12 @@ glamor_egl_release_pixmap_private(PixmapPtr pixmap)
       glDeleteMemoryObjectsEXT(1, &pixmap_priv->gl_memory_object_ext);
    }
    if (pixmap_priv->egl_image_khr) {
-      eglDestroyImageKHR(
-         glamor_egl_priv->display, pixmap_priv->egl_image_khr);
+      eglDestroyImageKHR(glamor_egl_priv->display,
+                         pixmap_priv->egl_image_khr);
    }
    if (pixmap_priv->lorie_buffer) {
       lorieUnregisterBuffer(pixmap_priv->lorie_buffer);
       LorieBuffer_release(pixmap_priv->lorie_buffer);
-   } else if (pixmap_priv->ahardware_buffer) {
-      AHardwareBuffer_release(pixmap_priv->ahardware_buffer);
    }
    if (pixmap_priv->bo) {
       vk_shm_bo_destroy(pixmap_priv->bo);
@@ -103,8 +100,8 @@ glamor_egl_destroy_pixmap(PixmapPtr pixmap)
 }
 
 static Bool
-glamor_create_texture_from_image(
-   ScreenPtr screen, EGLImageKHR image, GLuint *texture)
+glamor_create_texture_from_image(ScreenPtr screen, EGLImageKHR image,
+                                 GLuint *texture)
 {
    struct glamor_screen_private *glamor_priv =
       glamor_get_screen_private(screen);
@@ -132,21 +129,24 @@ glamor_egl_create_pixmap_from_ahardware_buffer(
    AHardwareBuffer_Desc ahardware_buffer_desc;
    AHardwareBuffer_describe(ahardware_buffer, &ahardware_buffer_desc);
 
-   PixmapPtr pixmap = glamor_create_pixmap(screen,
-      ahardware_buffer_desc.width, ahardware_buffer_desc.height, depth,
-      GLAMOR_CREATE_PIXMAP_NO_TEXTURE);
+   PixmapPtr pixmap =
+      glamor_create_pixmap(screen, ahardware_buffer_desc.width,
+                           ahardware_buffer_desc.height, depth,
+                           GLAMOR_CREATE_PIXMAP_NO_TEXTURE);
    if (!pixmap)
       return NullPixmap;
 
    struct glamor_egl_pixmap_private *pixmap_priv =
       glamor_egl_get_pixmap_private(pixmap);
 
-   static const EGLint egl_image_attribs[] = {
-      EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+   static const EGLint egl_image_attribs[] = {EGL_IMAGE_PRESERVED_KHR,
+                                              EGL_TRUE, EGL_NONE};
 
-   EGLImageKHR egl_image_khr = eglCreateImageKHR(glamor_egl_priv->display,
-      EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
-      eglGetNativeClientBufferANDROID(ahardware_buffer), egl_image_attribs);
+   EGLImageKHR egl_image_khr =
+      eglCreateImageKHR(glamor_egl_priv->display, EGL_NO_CONTEXT,
+                        EGL_NATIVE_BUFFER_ANDROID,
+                        eglGetNativeClientBufferANDROID(ahardware_buffer),
+                        egl_image_attribs);
    if (egl_image_khr == EGL_NO_IMAGE_KHR) {
       glamor_destroy_pixmap(pixmap);
       return NullPixmap;
@@ -157,46 +157,38 @@ glamor_egl_create_pixmap_from_ahardware_buffer(
    glamor_set_pixmap_type(pixmap, GLAMOR_TEXTURE_ONLY);
    glamor_set_pixmap_texture(pixmap, texture);
 
-   pixmap_priv->ahardware_buffer = ahardware_buffer;
    pixmap_priv->egl_image_khr = egl_image_khr;
    return pixmap;
 }
 
 PixmapPtr
-glamor_egl_create_pixmap_from_lorie_buffer(
-   ScreenPtr screen, int depth, LorieBuffer *lorie_buffer)
+glamor_egl_create_pixmap_from_lorie_buffer(ScreenPtr screen, int depth,
+                                           LorieBuffer *lorie_buffer)
 {
-   struct glamor_screen_private *glamor_priv =
-      glamor_get_screen_private(screen);
    struct glamor_egl_pixmap_private *pixmap_priv;
+   PixmapPtr pixmap;
 
    const LorieBuffer_Desc *desc = LorieBuffer_description(lorie_buffer);
-   PixmapPtr pixmap = glamor_create_pixmap(screen, desc->width, desc->height,
-      depth, GLAMOR_CREATE_PIXMAP_NO_TEXTURE);
+   pixmap = glamor_egl_create_pixmap_from_ahardware_buffer(screen, depth,
+                                                           desc->buffer);
    if (!pixmap)
       return NullPixmap;
 
    pixmap_priv = glamor_egl_get_pixmap_private(pixmap);
    pixmap_priv->lorie_buffer = lorie_buffer;
-
-   glamor_make_current(glamor_priv);
-
-   LorieBuffer_attachToGL(pixmap_priv->lorie_buffer);
-   GLuint texture = LorieBuffer_getGLTexture(pixmap_priv->lorie_buffer);
-   glamor_set_pixmap_type(pixmap, GLAMOR_TEXTURE_ONLY);
-   glamor_set_pixmap_texture(pixmap, texture);
    return pixmap;
 }
 
 PixmapPtr
 glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int w, int h,
-   int depth, size_t size, uint32_t offset, int fd)
+                                        int depth, size_t size,
+                                        uint32_t offset, int fd)
 {
    struct glamor_screen_private *glamor_priv =
       glamor_get_screen_private(screen);
 
-   PixmapPtr pixmap = glamor_create_pixmap(
-      screen, w, h, depth, GLAMOR_CREATE_PIXMAP_NO_TEXTURE);
+   PixmapPtr pixmap = glamor_create_pixmap(screen, w, h, depth,
+                                           GLAMOR_CREATE_PIXMAP_NO_TEXTURE);
    if (!pixmap)
       return NullPixmap;
 
@@ -212,7 +204,7 @@ glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int w, int h,
 
    glCreateMemoryObjectsEXT(1, &pixmap_priv->gl_memory_object_ext);
    glImportMemoryFdEXT(pixmap_priv->gl_memory_object_ext, size,
-      GL_HANDLE_TYPE_OPAQUE_FD_EXT, opaque_fd);
+                       GL_HANDLE_TYPE_OPAQUE_FD_EXT, opaque_fd);
 
    if (!glIsMemoryObjectEXT(pixmap_priv->gl_memory_object_ext))
       goto fail;
@@ -224,8 +216,8 @@ glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int w, int h,
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
    glTexStorageMem2DEXT(GL_TEXTURE_2D, 1,
-      glamor_priv->formats[depth].internalformat, w, h,
-      pixmap_priv->gl_memory_object_ext, offset);
+                        glamor_priv->formats[depth].internalformat, w, h,
+                        pixmap_priv->gl_memory_object_ext, offset);
    glBindTexture(GL_TEXTURE_2D, 0);
 
    glamor_set_pixmap_type(pixmap, GLAMOR_TEXTURE_ONLY);
@@ -277,9 +269,13 @@ glamor_egl_depth_format_vk(int depth)
 static PixmapPtr
 glamor_egl_create_pixmap_from_shm_bo(ScreenPtr screen, struct vk_shm_bo *bo)
 {
-   PixmapPtr pixmap = glamor_egl_create_pixmap_from_opaque_fd(screen,
-      vk_shm_bo_width(bo), vk_shm_bo_height(bo), vk_shm_bo_depth(bo),
-      vk_shm_bo_size(bo), vk_shm_bo_offset(bo), vk_shm_bo_fd(bo));
+   PixmapPtr pixmap =
+      glamor_egl_create_pixmap_from_opaque_fd(screen, vk_shm_bo_width(bo),
+                                              vk_shm_bo_height(bo),
+                                              vk_shm_bo_depth(bo),
+                                              vk_shm_bo_size(bo),
+                                              vk_shm_bo_offset(bo),
+                                              vk_shm_bo_fd(bo));
    if (pixmap)
       glamor_egl_set_pixmap_bo(pixmap, bo);
    return pixmap;
@@ -291,8 +287,8 @@ glamor_egl_create_screen_pixmap(ScreenPtr screen, int w, int h, int depth)
    LorieBuffer *lorie_buffer;
    PixmapPtr pixmap;
 
-   lorie_buffer = LorieBuffer_allocate(
-      w, h, glamor_egl_depth_format(depth), LORIEBUFFER_AHARDWAREBUFFER);
+   lorie_buffer = LorieBuffer_allocate(w, h, glamor_egl_depth_format(depth),
+                                       LORIEBUFFER_AHARDWAREBUFFER);
    if (!lorie_buffer)
       return NullPixmap;
 
@@ -304,8 +300,8 @@ glamor_egl_create_screen_pixmap(ScreenPtr screen, int w, int h, int depth)
 }
 
 PixmapPtr
-glamor_egl_create_pixmap(
-   ScreenPtr screen, int w, int h, int depth, unsigned int usage)
+glamor_egl_create_pixmap(ScreenPtr screen, int w, int h, int depth,
+                         unsigned int usage)
 {
    struct glamor_egl_screen_private *glamor_egl_priv =
       glamor_egl_get_screen_private(screen);
@@ -324,7 +320,7 @@ glamor_egl_create_pixmap(
       PixmapPtr new_pixmap;
 
       bo = vk_shm_bo_create(glamor_egl_priv->allocator, w, h, depth,
-         glamor_egl_depth_format_vk(depth), true);
+                            glamor_egl_depth_format_vk(depth), true);
       if (!bo)
          return pixmap;
 
@@ -378,7 +374,7 @@ glamor_egl_init(ScreenPtr screen)
    glamor_egl_set_screen_private(screen, glamor_egl_priv);
 
    if (!dixRegisterPrivateKey(&glamor_egl_pixmap_private_key, PRIVATE_PIXMAP,
-          sizeof(struct glamor_egl_pixmap_private)))
+                              sizeof(struct glamor_egl_pixmap_private)))
       FatalError("glamor_egl: Failed to allocate pixmap private\n");
 
    glamor_egl_priv->display =
@@ -397,17 +393,18 @@ glamor_egl_init(ScreenPtr screen)
    if (!eglBindAPI(EGL_OPENGL_ES_API))
       FatalError("glamor_egl: Failed to bind either GLES APIs.\n");
 
-   static const EGLint context_attribs[] = {
-      EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+   static const EGLint context_attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 2,
+                                            EGL_NONE};
 
-   glamor_egl_priv->context = eglCreateContext(glamor_egl_priv->display,
-      EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, context_attribs);
+   glamor_egl_priv->context =
+      eglCreateContext(glamor_egl_priv->display, EGL_NO_CONFIG_KHR,
+                       EGL_NO_CONTEXT, context_attribs);
 
    if (glamor_egl_priv->context == EGL_NO_CONTEXT)
       FatalError("glamor_egl: Failed to create GLES2 contexts\n");
 
    if (!eglMakeCurrent(glamor_egl_priv->display, EGL_NO_SURFACE,
-          EGL_NO_SURFACE, glamor_egl_priv->context))
+                       EGL_NO_SURFACE, glamor_egl_priv->context))
       FatalError("glamor_egl: Failed to make GLES2 context current\n");
 
    if (!glamor_init(screen, GLAMOR_USE_EGL_SCREEN))
@@ -435,10 +432,10 @@ glamor_egl_make_current(struct glamor_context *glamor_ctx)
     * EGL's no-op context change fast path when switching back to
     * EGL.
     */
-   eglMakeCurrent(
-      glamor_ctx->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+   eglMakeCurrent(glamor_ctx->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                  EGL_NO_CONTEXT);
    if (!eglMakeCurrent(glamor_ctx->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-          glamor_ctx->ctx)) {
+                       glamor_ctx->ctx)) {
       FatalError("glamor_egl: Failed to make EGL context current\n");
    }
 }
@@ -462,22 +459,23 @@ glamor_egl_screen_init(ScreenPtr screen, struct glamor_context *glamor_ctx)
 }
 
 int
-glamor_egl_fd_name_from_pixmap(
-   ScreenPtr screen, PixmapPtr pixmap, CARD16 *stride, CARD32 *size)
+glamor_egl_fd_name_from_pixmap(ScreenPtr screen, PixmapPtr pixmap,
+                               CARD16 *stride, CARD32 *size)
 {
    return -1;
 }
 
 int
 glamor_egl_fds_from_pixmap(ScreenPtr screen, PixmapPtr pixmap, int *fds,
-   uint32_t *offsets, uint32_t *strides, uint64_t *modifier)
+                           uint32_t *offsets, uint32_t *strides,
+                           uint64_t *modifier)
 {
    struct glamor_egl_pixmap_private *pixmap_priv =
       glamor_egl_get_pixmap_private(pixmap);
 
    if (!pixmap_priv->bo) {
       ErrorF("glamor_egl: %s failed depth %d\n", __func__,
-         pixmap->drawable.depth);
+             pixmap->drawable.depth);
       return 0;
    }
 
@@ -489,15 +487,15 @@ glamor_egl_fds_from_pixmap(ScreenPtr screen, PixmapPtr pixmap, int *fds,
 }
 
 int
-glamor_egl_fd_from_pixmap(
-   ScreenPtr screen, PixmapPtr pixmap, CARD16 *stride, CARD32 *size)
+glamor_egl_fd_from_pixmap(ScreenPtr screen, PixmapPtr pixmap, CARD16 *stride,
+                          CARD32 *size)
 {
    struct glamor_egl_pixmap_private *pixmap_priv =
       glamor_egl_get_pixmap_private(pixmap);
 
    if (!pixmap_priv->bo) {
       ErrorF("glamor_egl: %s failed depth %d\n", __func__,
-         pixmap->drawable.depth);
+             pixmap->drawable.depth);
       return -1;
    }
 

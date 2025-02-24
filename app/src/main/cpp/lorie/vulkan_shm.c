@@ -50,8 +50,9 @@ vk_shm_bo_destroy(struct vk_shm_bo *bo)
 
 static struct vk_shm_bo *
 vk_shm_bo_create_internal(struct vk_shm_allocator *allocator,
-   unsigned int width, unsigned int height, unsigned int depth,
-   VkFormat format, bool linear, int fd)
+                          unsigned int width, unsigned int height,
+                          unsigned int depth, VkFormat format, bool linear,
+                          int fd)
 {
    struct vk_shm_bo *bo;
    VkResult result;
@@ -102,8 +103,8 @@ vk_shm_bo_create_internal(struct vk_shm_allocator *allocator,
    for (int i = 0; i < allocator->memory_props.memoryTypeCount; i++) {
       if (allocator->memory_props.memoryTypes[i].propertyFlags &
           (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
          memory_type_index = i;
          break;
       }
@@ -139,8 +140,8 @@ vk_shm_bo_create_internal(struct vk_shm_allocator *allocator,
    if (result != VK_SUCCESS)
       goto fail;
 
-   result = vkBindImageMemory(
-      allocator->device, bo->image, bo->memory, VK_WHOLE_SIZE);
+   result = vkBindImageMemory(allocator->device, bo->image, bo->memory,
+                              VK_WHOLE_SIZE);
    if (result != VK_SUCCESS)
       goto fail;
 
@@ -176,22 +177,23 @@ fail:
 
 struct vk_shm_bo *
 vk_shm_bo_create(struct vk_shm_allocator *allocator, unsigned int width,
-   unsigned int height, unsigned int depth, VkFormat format, bool linear)
+                 unsigned int height, unsigned int depth, VkFormat format,
+                 bool linear)
 {
-   return vk_shm_bo_create_internal(
-      allocator, width, height, depth, format, linear, -1);
+   return vk_shm_bo_create_internal(allocator, width, height, depth, format,
+                                    linear, -1);
 }
 
 struct vk_shm_bo *
 vk_shm_bo_import(struct vk_shm_allocator *allocator, unsigned int width,
-   unsigned int height, unsigned int depth, VkFormat format, bool linear,
-   int fd)
+                 unsigned int height, unsigned int depth, VkFormat format,
+                 bool linear, int fd)
 {
    if (fd < 0)
       return NULL;
 
-   return vk_shm_bo_create_internal(
-      allocator, width, height, depth, format, linear, fd);
+   return vk_shm_bo_create_internal(allocator, width, height, depth, format,
+                                    linear, fd);
 }
 
 int
@@ -240,8 +242,8 @@ void *
 vk_shm_bo_map(struct vk_shm_bo *bo)
 {
    void *address = NULL;
-   vkMapMemory(
-      bo->allocator->device, bo->memory, bo->offset, bo->size, 0, &address);
+   vkMapMemory(bo->allocator->device, bo->memory, bo->offset, bo->size, 0,
+               &address);
    return address;
 }
 
@@ -288,13 +290,14 @@ vk_shm_allocator_create(void)
       goto fail;
 
    uint32_t physical_dev_count = 1;
-   result = vkEnumeratePhysicalDevices(
-      allocator->instance, &physical_dev_count, &allocator->physical_dev);
+   result =
+      vkEnumeratePhysicalDevices(allocator->instance, &physical_dev_count,
+                                 &allocator->physical_dev);
    if (result != VK_SUCCESS && allocator->physical_dev == VK_NULL_HANDLE)
       goto fail;
 
-   vkGetPhysicalDeviceMemoryProperties(
-      allocator->physical_dev, &allocator->memory_props);
+   vkGetPhysicalDeviceMemoryProperties(allocator->physical_dev,
+                                       &allocator->memory_props);
 
    const VkDeviceQueueCreateInfo dqci = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -314,8 +317,9 @@ vk_shm_allocator_create(void)
    if (result != VK_SUCCESS)
       goto fail;
 
-   allocator->vkGetMemoryFdKHR = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(
-      allocator->device, "vkGetMemoryFdKHR");
+   allocator->vkGetMemoryFdKHR =
+      (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(allocator->device,
+                                                "vkGetMemoryFdKHR");
    return allocator;
 
 fail:

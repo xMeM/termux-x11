@@ -7,10 +7,12 @@ struct vk_shm_bo;
 
 struct vk_shm_bo *
 vk_shm_bo_create(struct vk_shm_allocator *allocator, unsigned int width,
-   unsigned int height, unsigned int depth, VkFormat format, bool linear);
-struct vk_shm_bo *vk_shm_bo_import(struct vk_shm_allocator *allocator,
-   unsigned int width, unsigned int height, unsigned int depth,
-   VkFormat format, bool linear, int fd);
+                 unsigned int height, unsigned int depth, VkFormat format,
+                 bool linear);
+struct vk_shm_bo *
+vk_shm_bo_import(struct vk_shm_allocator *allocator, unsigned int width,
+                 unsigned int height, unsigned int depth, VkFormat format,
+                 bool linear, int fd);
 int vk_shm_bo_fd(struct vk_shm_bo *bo);
 uint32_t vk_shm_bo_stride(struct vk_shm_bo *bo);
 uint32_t vk_shm_bo_offset(struct vk_shm_bo *bo);
