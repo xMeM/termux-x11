@@ -10,8 +10,6 @@ struct glamor_egl_screen_private {
    EGLDisplay display;
    EGLContext context;
 
-   struct vk_shm_allocator *allocator;
-
    CloseScreenProcPtr CloseScreen;
    CreatePixmapProcPtr CreatePixmap;
    DestroyPixmapProcPtr DestroyPixmap;
@@ -24,6 +22,8 @@ struct glamor_egl_pixmap_private {
 
    struct vk_shm_bo *bo;
 };
+
+static struct vk_shm_allocator *allocator = NULL;
 
 DevPrivateKeyRec glamor_egl_screen_private_key;
 DevPrivateKeyRec glamor_egl_pixmap_private_key;
@@ -234,13 +234,9 @@ static uint32_t
 glamor_egl_depth_format(int depth)
 {
    switch (depth) {
-   case 16:
-      return AHARDWAREBUFFER_FORMAT_R5G6B5_UNORM;
    case 24:
    case 32:
       return AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM;
-   case 30:
-      return AHARDWAREBUFFER_FORMAT_R10G10B10A2_UNORM;
 
    default:
       FatalError("depth %d no supported format\n", depth);
@@ -251,15 +247,9 @@ static VkFormat
 glamor_egl_depth_format_vk(int depth)
 {
    switch (depth) {
-   case 15:
-      return VK_FORMAT_R5G5B5A1_UNORM_PACK16;
-   case 16:
-      return VK_FORMAT_R5G6B5_UNORM_PACK16;
    case 24:
    case 32:
       return VK_FORMAT_B8G8R8A8_UNORM;
-   case 30:
-      return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
 
    default:
       FatalError("depth %d no supported vulkan format\n", depth);
@@ -303,37 +293,10 @@ PixmapPtr
 glamor_egl_create_pixmap(ScreenPtr screen, int w, int h, int depth,
                          unsigned int usage)
 {
-   struct glamor_egl_screen_private *glamor_egl_priv =
-      glamor_egl_get_screen_private(screen);
-   struct glamor_screen_private *glamor_priv =
-      glamor_get_screen_private(screen);
-
    if (usage == CREATE_PIXMAP_USAGE_LORIEBUFFER_BACKED)
       return glamor_egl_create_screen_pixmap(screen, w, h, depth);
 
-   PixmapPtr pixmap = glamor_create_pixmap(screen, w, h, depth, usage);
-   if (!pixmap)
-      return fbCreatePixmap(screen, w, h, depth, usage);
-
-   if (glamor_pixmap_has_fbo(pixmap) && depth >= 15) {
-      struct vk_shm_bo *bo;
-      PixmapPtr new_pixmap;
-
-      bo = vk_shm_bo_create(glamor_egl_priv->allocator, w, h, depth,
-                            glamor_egl_depth_format_vk(depth), true);
-      if (!bo)
-         return pixmap;
-
-      new_pixmap = glamor_egl_create_pixmap_from_shm_bo(screen, bo);
-      if (!new_pixmap) {
-         vk_shm_bo_destroy(bo);
-         return pixmap;
-      }
-
-      glamor_destroy_pixmap(pixmap);
-      return new_pixmap;
-   }
-   return pixmap;
+   return glamor_create_pixmap(screen, w, h, depth, usage);
 }
 
 static Bool
@@ -354,7 +317,6 @@ glamor_egl_close_screen(ScreenPtr screen)
    eglDestroyContext(glamor_egl_priv->display, glamor_egl_priv->context);
    eglTerminate(glamor_egl_priv->display);
 
-   vk_shm_allocator_destroy(glamor_egl_priv->allocator);
    free(glamor_egl_priv);
    return ret;
 }
@@ -378,7 +340,8 @@ glamor_egl_init(ScreenPtr screen)
       FatalError("glamor_egl: Failed to allocate pixmap private\n");
 
    glamor_egl_priv->display =
-      glamor_egl_get_display(EGL_PLATFORM_ANDROID_KHR, EGL_DEFAULT_DISPLAY);
+      glamor_egl_get_display(0x3202 /*EGL_PLATFORM_ANGLE_ANGLE*/,
+                             EGL_DEFAULT_DISPLAY);
 
    if (!glamor_egl_priv->display)
       FatalError("eglGetDisplay() failed\n");
@@ -410,8 +373,7 @@ glamor_egl_init(ScreenPtr screen)
    if (!glamor_init(screen, GLAMOR_USE_EGL_SCREEN))
       FatalError("glamor_egl: glamor_init failed\n");
 
-   glamor_egl_priv->allocator = vk_shm_allocator_create();
-   if (!glamor_egl_priv->allocator)
+   if (!allocator && (allocator = vk_shm_allocator_create()) == NULL)
       FatalError("glamor_egl: Failed to create vulkan memory allocator\n");
 
    glamor_egl_priv->CreatePixmap = screen->CreatePixmap;
@@ -465,6 +427,41 @@ glamor_egl_fd_name_from_pixmap(ScreenPtr screen, PixmapPtr pixmap,
    return -1;
 }
 
+static Bool
+glamor_egl_make_pixmap_exportable(PixmapPtr pixmap)
+{
+   ScreenPtr screen = pixmap->drawable.pScreen;
+   PixmapPtr temp_pixmap;
+   struct vk_shm_bo *bo;
+   GCPtr pGC;
+
+   bo = vk_shm_bo_create(allocator, pixmap->drawable.width,
+                         pixmap->drawable.height, pixmap->drawable.depth,
+                         glamor_egl_depth_format_vk(pixmap->drawable.depth),
+                         false);
+   if (!bo)
+      return FALSE;
+
+   temp_pixmap = glamor_egl_create_pixmap_from_shm_bo(screen, bo);
+   if (!temp_pixmap) {
+      vk_shm_bo_destroy(bo);
+      return FALSE;
+   }
+
+   pGC = GetScratchGC(temp_pixmap->drawable.depth, screen);
+   ValidateGC(&temp_pixmap->drawable, pGC);
+   (*pGC->ops->CopyArea)(&pixmap->drawable, &temp_pixmap->drawable, pGC, 0, 0,
+                         pixmap->drawable.width, pixmap->drawable.height, 0,
+                         0);
+   FreeScratchGC(pGC);
+
+   glamor_finish(screen);
+   glamor_pixmap_exchange_fbos(pixmap, temp_pixmap);
+   glamor_egl_exchange_buffers(pixmap, temp_pixmap);
+   glamor_destroy_pixmap(temp_pixmap);
+   return TRUE;
+}
+
 int
 glamor_egl_fds_from_pixmap(ScreenPtr screen, PixmapPtr pixmap, int *fds,
                            uint32_t *offsets, uint32_t *strides,
@@ -473,9 +470,8 @@ glamor_egl_fds_from_pixmap(ScreenPtr screen, PixmapPtr pixmap, int *fds,
    struct glamor_egl_pixmap_private *pixmap_priv =
       glamor_egl_get_pixmap_private(pixmap);
 
-   if (!pixmap_priv->bo) {
-      ErrorF("glamor_egl: %s failed depth %d\n", __func__,
-             pixmap->drawable.depth);
+   if (!pixmap_priv->bo && !glamor_egl_make_pixmap_exportable(pixmap)) {
+      ErrorF("glamor_egl: %s failed", __func__);
       return 0;
    }
 
@@ -493,10 +489,9 @@ glamor_egl_fd_from_pixmap(ScreenPtr screen, PixmapPtr pixmap, CARD16 *stride,
    struct glamor_egl_pixmap_private *pixmap_priv =
       glamor_egl_get_pixmap_private(pixmap);
 
-   if (!pixmap_priv->bo) {
-      ErrorF("glamor_egl: %s failed depth %d\n", __func__,
-             pixmap->drawable.depth);
-      return -1;
+   if (!pixmap_priv->bo && !glamor_egl_make_pixmap_exportable(pixmap)) {
+      ErrorF("glamor_egl: %s failed", __func__);
+      return 0;
    }
 
    *stride = vk_shm_bo_stride(pixmap_priv->bo);

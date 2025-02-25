@@ -1,0 +1,28 @@
+diff --git a/src/dispatch_common.c b/src/dispatch_common.c
+index 153eb7c..84d6ab6 100644
+--- a/src/dispatch_common.c
++++ b/src/dispatch_common.c
+@@ -114,7 +114,7 @@
+  *      3.6. To perform the dynamic query, libGL also must export an entry
+  *           point called
+  *
+- *           void (*glXGetProcAddressARB(const GLubyte *))(); 
++ *           void (*glXGetProcAddressARB(const GLubyte *))();
+  *
+  *      The full specification of this function is available separately. It
+  *      takes the string name of a GL or GLX entry point and returns a pointer
+@@ -179,10 +179,10 @@
+ #define GLES1_LIB "libGLESv1_CM.so"
+ #define GLES2_LIB "libGLESv2.so"
+ #elif defined(__ANDROID__)
+-#define GLX_LIB "libGLESv2.so"
+-#define EGL_LIB "libEGL.so"
+-#define GLES1_LIB "libGLESv1_CM.so"
+-#define GLES2_LIB "libGLESv2.so"
++#define GLX_LIB "/data/data/com.termux/files/usr/opt/angle-android/vulkan/libGLESv2_angle.so"
++#define EGL_LIB "/data/data/com.termux/files/usr/opt/angle-android/vulkan/libEGL_angle.so"
++#define GLES1_LIB "/data/data/com.termux/files/usr/opt/angle-android/vulkan/libGLESv1_CM_angle.so"
++#define GLES2_LIB "/data/data/com.termux/files/usr/opt/angle-android/vulkan/libGLESv2_angle.so"
+ #elif defined(_WIN32)
+ #define EGL_LIB "libEGL.dll"
+ #define GLES1_LIB "libGLES_CM.dll"
