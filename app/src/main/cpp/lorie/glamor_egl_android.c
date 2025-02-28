@@ -212,6 +212,8 @@ glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int w, int h,
    uint32_t texture;
    glGenTextures(1, &texture);
    glBindTexture(GL_TEXTURE_2D, texture);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_TILING_EXT,
+                   GL_OPTIMAL_TILING_EXT);
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
