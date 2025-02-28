@@ -13,6 +13,7 @@ struct vk_shm_allocator {
    VkDevice device;
 
    PFN_vkGetMemoryFdKHR vkGetMemoryFdKHR;
+   PFN_vkGetPhysicalDeviceImageFormatProperties2 vkGPDIFP2;
 };
 
 struct vk_shm_bo {
@@ -28,6 +29,7 @@ struct vk_shm_bo {
 
 static const char *instance_exts[] = {
    "VK_KHR_external_memory_capabilities",
+   "VK_KHR_get_physical_device_properties2",
 };
 
 static const char *device_exts[] = {
@@ -67,6 +69,42 @@ vk_shm_bo_create_internal(struct vk_shm_allocator *allocator,
    bo->height = height;
    bo->depth = depth;
 
+   VkPhysicalDeviceExternalImageFormatInfo efmti = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+      .pNext = NULL,
+      .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+   };
+   VkPhysicalDeviceImageFormatInfo2 fmti = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+      .pNext = &efmti,
+      .flags = VK_IMAGE_CREATE_ALIAS_BIT,
+      .format = format,
+      .type = VK_IMAGE_TYPE_2D,
+      .tiling = linear ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL,
+      .usage = linear ? VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                      : VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
+                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                           VK_IMAGE_USAGE_SAMPLED_BIT |
+                           VK_IMAGE_USAGE_STORAGE_BIT,
+   };
+   VkExternalImageFormatProperties efmtp = {
+      .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
+      .pNext = NULL,
+   };
+   VkImageFormatProperties2 fmtp = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+      .pNext = &efmtp,
+   };
+   result = allocator->vkGPDIFP2(allocator->physical_dev, &fmti, &fmtp);
+   if (result != VK_SUCCESS ||
+       width > fmtp.imageFormatProperties.maxExtent.width ||
+       height > fmtp.imageFormatProperties.maxExtent.height ||
+       !(efmtp.externalMemoryProperties.externalMemoryFeatures &
+         VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) ||
+       !(efmtp.externalMemoryProperties.externalMemoryFeatures &
+         VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT))
+      goto fail;
+
    const VkExternalMemoryImageCreateInfo emici = {
       .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
       .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
@@ -83,14 +121,10 @@ vk_shm_bo_create_internal(struct vk_shm_allocator *allocator,
       .imageType = VK_IMAGE_TYPE_2D,
       .format = format,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-      .queueFamilyIndexCount = 1,
-      .pQueueFamilyIndices = &(uint32_t){0},
       .samples = VK_SAMPLE_COUNT_1_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-      .tiling = linear ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL,
-      .usage = linear ? VK_IMAGE_USAGE_TRANSFER_DST_BIT
-                      : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                           VK_IMAGE_USAGE_SAMPLED_BIT,
+      .tiling = fmti.tiling,
+      .usage = fmti.usage,
    };
    result = vkCreateImage(allocator->device, &ici, NULL, &bo->image);
    if (result != VK_SUCCESS)
@@ -103,8 +137,7 @@ vk_shm_bo_create_internal(struct vk_shm_allocator *allocator,
    for (int i = 0; i < allocator->memory_props.memoryTypeCount; i++) {
       if (allocator->memory_props.memoryTypes[i].propertyFlags &
           (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
          memory_type_index = i;
          break;
       }
@@ -317,6 +350,9 @@ vk_shm_allocator_create(void)
    if (result != VK_SUCCESS)
       goto fail;
 
+   allocator->vkGPDIFP2 = (PFN_vkGetPhysicalDeviceImageFormatProperties2)
+      vkGetInstanceProcAddr(allocator->instance,
+                            "vkGetPhysicalDeviceImageFormatProperties2");
    allocator->vkGetMemoryFdKHR =
       (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(allocator->device,
                                                 "vkGetMemoryFdKHR");
