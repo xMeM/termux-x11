@@ -649,7 +649,6 @@ __noreturn static void* rendererThread(void) {
             LorieBuffer_attachToGL(buf);
             LorieBuffer_removeFromList(buf); // remove from addedBuffers
             LorieBuffer_addToList(buf, &buffers);
-            waitingForBuffers = false;
         }
 
         pthread_cond_signal(&stateChangeFinishCond);

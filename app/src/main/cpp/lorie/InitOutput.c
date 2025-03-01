@@ -31,7 +31,6 @@
 #include "present_priv.h"
 #include "misyncshm.h"
 #include "glamor.h"
-#include "glamor_egl.h"
 #include "glamor_egl_android.h"
 #include "glxserver.h"
 #include "glxutil.h"
@@ -514,7 +513,7 @@ void lorieSetWindowPixmap(WindowPtr pWindow, PixmapPtr newPixmap) {
     bool isRoot = pWindow == pScreenPtr->root;
     PixmapPtr oldPixmap = isRoot ? pScreenPtr->GetWindowPixmap(pWindow) : NULL;
     LoriePixmapPriv *old, *new;
-    if (isRoot) {
+    if (!pvfb->glamor && isRoot) {
         old = LORIE_PIXMAP_PRIV_FROM_PIXMAP(oldPixmap);
         new = LORIE_PIXMAP_PRIV_FROM_PIXMAP(newPixmap);
         if (old && old->buffer && old->locked) {
@@ -816,34 +815,49 @@ static void loriePerformVblanks(void) {
 }
 
 Bool loriePresentFlip(__unused RRCrtcPtr crtc, __unused uint64_t event_id, __unused uint64_t target_msc, PixmapPtr pixmap, __unused Bool sync_flip) {
-    if (pvfb->glamor)
-        return FALSE;
+    if (pvfb->glamor) {
+        LorieBuffer *lb = glamor_egl_get_pixmap_lorie_buffer(pixmap);
+        const LorieBuffer_Desc *desc;
 
-    LoriePixmapPriv* priv = (LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap);
-    if (!priv || !priv->buffer || priv->mem || pvfb->root.width != pixmap->drawable.width || pvfb->root.width != pixmap->drawable.height)
-        return FALSE;
+        if (!lb || pvfb->root.width != pixmap->drawable.width || pvfb->root.height != pixmap->drawable.height)
+            return FALSE;
 
-    const LorieBuffer_Desc *desc = LorieBuffer_description(priv->buffer);
-    char *forceFlip = getenv("TERMUX_X11_FORCE_FLIP");
-    if (desc->type == LORIEBUFFER_FD && priv->imported && !(forceFlip && strcmp(forceFlip, "1") == 0))
-        return FALSE; // For some reason it does not work fine with turnip.
+        desc = LorieBuffer_description(lb);
+        if (desc->type != LORIEBUFFER_OPAQUE_FD && desc->type != LORIEBUFFER_AHARDWAREBUFFER)
+            return FALSE;
 
-    if (desc->type == LORIEBUFFER_REGULAR) {
-        // Regular buffers can not be shared to activity, we must explicitly convert LorieBuffer to FD or AHardwareBuffer
-        int8_t type = pvfb->root.legacyDrawing ? LORIEBUFFER_FD : LORIEBUFFER_AHARDWAREBUFFER;
-        int8_t format = pvfb->root.flip ? AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM : AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM;
-        LorieBuffer_convert(priv->buffer, type, format);
-        if (desc->type != LORIEBUFFER_REGULAR) {
-            // LorieBuffer_convert does not report status but it does not let the type change in the case of error.
-            pScreenPtr->ModifyPixmapHeader(pixmap, 0, 0, 0, 0, desc->stride * 4, NULL);
-            LorieBuffer_lock(priv->buffer, &priv->locked);
+        dprintf(2, "flip! pixmap %dx%d screen %dx%d\n", pixmap->drawable.width, pixmap->drawable.height, pvfb->root.width, pvfb->root.height);
+
+        lorieRegisterBuffer(lb);
+    } else {
+        LoriePixmapPriv* priv = (LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap);
+        if (!priv || !priv->buffer || priv->mem || pvfb->root.width != pixmap->drawable.width || pvfb->root.width != pixmap->drawable.height)
+            return FALSE;
+
+        const LorieBuffer_Desc *desc = LorieBuffer_description(priv->buffer);
+        char *forceFlip = getenv("TERMUX_X11_FORCE_FLIP");
+        if (desc->type == LORIEBUFFER_FD && priv->imported && !(forceFlip && strcmp(forceFlip, "1") == 0))
+            return FALSE; // For some reason it does not work fine with turnip.
+
+        if (desc->type == LORIEBUFFER_REGULAR) {
+            // Regular buffers can not be shared to activity, we must explicitly convert LorieBuffer to FD or AHardwareBuffer
+            int8_t type = pvfb->root.legacyDrawing ? LORIEBUFFER_FD : LORIEBUFFER_AHARDWAREBUFFER;
+            int8_t format = pvfb->root.flip ? AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM : AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM;
+            LorieBuffer_convert(priv->buffer, type, format);
+            if (desc->type != LORIEBUFFER_REGULAR) {
+                // LorieBuffer_convert does not report status but it does not let the type change in the case of error.
+                pScreenPtr->ModifyPixmapHeader(pixmap, 0, 0, 0, 0, desc->stride * 4, NULL);
+                LorieBuffer_lock(priv->buffer, &priv->locked);
+            }
         }
+
+        if (desc->type != LORIEBUFFER_FD && desc->type != LORIEBUFFER_AHARDWAREBUFFER)
+            return FALSE;
+
+        dprintf(2, "flip! pixmap %dx%d screen %dx%d\n", pixmap->drawable.width, pixmap->drawable.height, pvfb->root.width, pvfb->root.height);
+
+        lorieRegisterBuffer(priv->buffer);
     }
-
-    if (desc->type != LORIEBUFFER_FD && desc->type != LORIEBUFFER_AHARDWAREBUFFER)
-        return FALSE;
-
-    lorieRegisterBuffer(priv->buffer);
     return TRUE;
 }
 
@@ -981,8 +995,14 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
     if (modifier == DRM_FORMAT_MOD_INVALID || modifier == DRM_FORMAT_MOD_LINEAR || modifier == RAW_MMAPPABLE_FD) {
         if (pvfb->glamor) {
             if (modifier == DRM_FORMAT_MOD_LINEAR) {
+                lb = LorieBuffer_wrapOpaqueFileDescriptor(width, height, AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, fcntl(fds[0], F_DUPFD_CLOEXEC, 0),
+                                                          strides[0] * height, offsets[0]);
+                check(!lb, "DRI3: LorieBuffer_wrapOpaqueAHardwareBuffer failed.");
                 pixmap = glamor_egl_create_pixmap_from_opaque_fd(screen, width, height, depth, strides[0] * height, offsets[0], fds[0]);
                 check(!pixmap, "DRI3: failed to create pixmap from opaque fd");
+                glamor_egl_set_pixmap_lorie_buffer(pixmap, lb);
+            } else {
+                check(true, "DRI3: unsupported modifier");
             }
         } else {
             pixmap = screen->CreatePixmap(screen, 0, 0, depth, 0);
