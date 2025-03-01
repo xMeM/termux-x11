@@ -204,6 +204,10 @@ static int xcallback(int fd, int events, __unused void* data) {
                     rendererRemoveBuffer(e.removeBuffer.id);
                     break;
                 }
+                case EVENT_REQUEST_DRAW: {
+                    rendererRequestDraw(e.draw.id);
+                    break;
+                }
             }
         }
 

@@ -431,6 +431,14 @@ void rendererRemoveAllBuffers(void) {
     pthread_spin_unlock(&bufferLock);
 }
 
+void rendererRequestDraw(uint64_t id) {
+    pthread_mutex_lock(&stateLock);
+    state->rootWindowTextureID = id;
+    state->drawRequested = TRUE;
+    pthread_cond_signal(&state->cond);
+    pthread_mutex_unlock(&stateLock);
+}
+
 void rendererSetWindow(ANativeWindow* newWin) {
     pthread_mutex_lock(&stateLock);
     if (newWin && pendingWin == newWin) {

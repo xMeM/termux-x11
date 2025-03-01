@@ -472,6 +472,17 @@ void lorieUnregisterBuffer(LorieBuffer* buffer) {
     }
 }
 
+void lorieRequestDraw(LorieBuffer* buffer) {
+    unsigned long id;
+    if (!buffer || (!LorieBufferList_findById(&registeredBuffers, (id = LorieBuffer_description(buffer)->id))))
+        return;  // Not exist or not registered so no need to unregister
+
+    if (conn_fd != -1 && buffer) {
+        lorieEvent e = { .draw = { .t = EVENT_REQUEST_DRAW, .id = id } };
+        write(conn_fd, &e, sizeof(e));
+    }
+}
+
 JNIEXPORT jobject JNICALL
 Java_com_termux_x11_CmdEntryPoint_getXConnection(JNIEnv *env, __unused jobject cls) {
     int client[2];

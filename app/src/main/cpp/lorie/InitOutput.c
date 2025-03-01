@@ -336,12 +336,21 @@ static RRModePtr lorieCvt(int width, int height, int framerate) {
 }
 
 static void lorieMoveCursor(unused DeviceIntPtr pDev, unused ScreenPtr pScr, int x, int y) {
+    PixmapPtr pixmap = pScreenPtr->root ? pScreenPtr->GetWindowPixmap(pScreenPtr->root) : NULL;
+    LorieBuffer *draw_buf = NULL;
     pvfb->state->cursor.x = x;
     pvfb->state->cursor.y = y;
     pvfb->state->cursor.moved = TRUE;
-    // No need to explicitly lock the mutex, it will cause waiting for rendering to be finished.
-    // We are simply signaling the renderer in the case if it sleeps.
-    pthread_cond_signal(&pvfb->state->cond);
+
+    if (pvfb->glamor) {
+        draw_buf = pixmap ? glamor_egl_get_pixmap_lorie_buffer(pixmap) : NULL;
+    } else {
+        draw_buf = LORIE_BUFFER_FROM_PIXMAP(pixmap);
+    }
+
+    if (draw_buf) {
+        lorieRequestDraw(draw_buf);
+    }
 }
 
 static void lorieConvertCursor(CursorPtr pCurs, uint32_t *data) {
@@ -413,7 +422,7 @@ static void loriePerformVblanks(void);
 
 static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
     int status, nonEmpty;
-    LoriePixmapPriv* priv = NULL;
+    LorieBuffer *draw_buf = NULL;
     PixmapPtr root = pScreenPtr && pScreenPtr->root ? pScreenPtr->GetWindowPixmap(pScreenPtr->root) : NULL;
 
     pvfb->current_msc++;
@@ -426,47 +435,37 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
 
     nonEmpty = RegionNotEmpty(DamageRegion(pvfb->damage));
 
-    if (pvfb->glamor)
+    if (pvfb->glamor) {
+        draw_buf = root ? glamor_egl_get_pixmap_lorie_buffer(root) : NULL;
         glamor_finish(pScreenPtr);
-    else
+    } else {
+        LoriePixmapPriv* priv;
         priv = root ? exaGetPixmapDriverPrivate(root) : NULL;
 
-    if (!priv && !pvfb->glamor)
-        // Impossible situation, but let's skip this step
+        if (nonEmpty && priv && priv->buffer) {
+            // We should unlock and lock buffer in order to update texture content on some devices
+            // In most cases AHardwareBuffer uses DMA memory which is shared between CPU and GPU
+            // and this is not needed. But according to docs we should do it for any case.
+            // Also according to AHardwareBuffer docs simultaneous reading in rendering thread and
+            // locking for writing in other thread is fine.
+            if (priv->locked) {
+                LorieBuffer_unlock(priv->buffer);
+                status = LorieBuffer_lock(priv->buffer, &priv->locked);
+                if (status)
+                    FatalError("Failed to lock the surface: %d\n", status);
+            }
+            draw_buf = priv->buffer;
+        }
+    }
+
+    if (!draw_buf)
         return TRUE;
 
-    if (nonEmpty && priv && priv->buffer) {
-        // We should unlock and lock buffer in order to update texture content on some devices
-        // In most cases AHardwareBuffer uses DMA memory which is shared between CPU and GPU
-        // and this is not needed. But according to docs we should do it for any case.
-        // Also according to AHardwareBuffer docs simultaneous reading in rendering thread and
-        // locking for writing in other thread is fine.
-        if (priv->locked) {
-            LorieBuffer_unlock(priv->buffer);
-            status = LorieBuffer_lock(priv->buffer, &priv->locked);
-            if (status)
-                FatalError("Failed to lock the surface: %d\n", status);
+    if (nonEmpty || pvfb->state->cursor.moved || pvfb->state->cursor.updated) {
+        if (nonEmpty) {
+            DamageEmpty(pvfb->damage);
         }
-    }
-
-    if (nonEmpty) {
-        DamageEmpty(pvfb->damage);
-        pvfb->state->drawRequested = TRUE;
-    }
-
-    if (pvfb->state->drawRequested || pvfb->state->cursor.moved || pvfb->state->cursor.updated) {
-        if (pvfb->glamor) {
-            LorieBuffer *root_bo = glamor_egl_get_pixmap_lorie_buffer(root);
-            pvfb->state->rootWindowTextureID = LorieBuffer_description(root_bo)->id;
-        } else {
-            pvfb->state->rootWindowTextureID = LorieBuffer_description(priv->buffer)->id;
-        }
-
-        // Sending signal about pending root window changes to renderer thread.
-        // We do not explicitly lock the pvfb->state->lock here because we do not want to wait
-        // for all drawing operations to be finished.
-        // Renderer thread will check the `drawRequested` flag right before going to sleep.
-        pthread_cond_signal(&pvfb->state->cond);
+        lorieRequestDraw(draw_buf);
     }
 
     return TRUE;
@@ -514,7 +513,7 @@ void lorieSetWindowPixmap(WindowPtr pWindow, PixmapPtr newPixmap) {
     bool isRoot = pWindow == pScreenPtr->root;
     PixmapPtr oldPixmap = isRoot ? pScreenPtr->GetWindowPixmap(pWindow) : NULL;
     LoriePixmapPriv *old, *new;
-    if (isRoot) {
+    if (isRoot && !pvfb->glamor) {
         old = LORIE_PIXMAP_PRIV_FROM_PIXMAP(oldPixmap);
         new = LORIE_PIXMAP_PRIV_FROM_PIXMAP(newPixmap);
         if (old && old->buffer && old->locked) {

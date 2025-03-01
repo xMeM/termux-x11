@@ -35,6 +35,7 @@ void lorieSendSharedServerState(int memfd);
 void lorieRegisterBuffer(LorieBuffer* buffer);
 void lorieUnregisterBuffer(LorieBuffer* buffer);
 bool lorieConnectionAlive(void);
+void lorieRequestDraw(LorieBuffer* buffer);
 
 __unused void rendererInit(JNIEnv* env);
 __unused void rendererTestCapabilities(int* legacy_drawing, uint8_t* flip);
@@ -43,6 +44,7 @@ __unused void rendererSetSharedState(struct lorie_shared_server_state* newState)
 __unused void rendererAddBuffer(LorieBuffer* buf);
 __unused void rendererRemoveBuffer(uint64_t id);
 __unused void rendererRemoveAllBuffers(void);
+__unused void rendererRequestDraw(uint64_t id);
 
 static inline __always_inline void lorie_mutex_lock(pthread_mutex_t* mutex, pid_t* lockingPid) {
     // Unfortunately there is no robust mutexes in bionic.
@@ -91,6 +93,7 @@ typedef enum {
     EVENT_SHARED_SERVER_STATE,
     EVENT_ADD_BUFFER,
     EVENT_REMOVE_BUFFER,
+    EVENT_REQUEST_DRAW,
     EVENT_SCREEN_SIZE,
     EVENT_TOUCH,
     EVENT_MOUSE,
@@ -116,6 +119,10 @@ typedef union {
         uint8_t t;
         unsigned long id;
     } removeBuffer;
+    struct {
+        uint8_t t;
+        unsigned long id;
+    } draw;
     struct {
         uint8_t t;
         uint16_t type, id, x, y;
