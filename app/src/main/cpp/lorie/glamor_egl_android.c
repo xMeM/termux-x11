@@ -51,13 +51,22 @@ glamor_egl_get_pixmap_private(PixmapPtr pixmap)
       dixLookupPrivate(&pixmap->devPrivates, &glamor_egl_pixmap_private_key);
 }
 
-static void
+void
 glamor_egl_set_pixmap_bo(PixmapPtr pixmap, struct vk_shm_bo *bo)
 {
    struct glamor_egl_pixmap_private *pixmap_priv =
       glamor_egl_get_pixmap_private(pixmap);
 
    pixmap_priv->bo = bo;
+}
+
+void
+glamor_egl_set_pixmap_lorie_buffer(PixmapPtr pixmap, LorieBuffer *lb)
+{
+   struct glamor_egl_pixmap_private *pixmap_priv =
+      glamor_egl_get_pixmap_private(pixmap);
+
+   pixmap_priv->lorie_buffer = lb;
 }
 
 static void
@@ -180,14 +189,14 @@ glamor_egl_create_pixmap_from_lorie_buffer(ScreenPtr screen, int depth,
 }
 
 PixmapPtr
-glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int w, int h,
-                                        int depth, size_t size,
+glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int width,
+                                        int height, int depth, size_t size,
                                         uint32_t offset, int fd)
 {
    struct glamor_screen_private *glamor_priv =
       glamor_get_screen_private(screen);
 
-   PixmapPtr pixmap = glamor_create_pixmap(screen, w, h, depth,
+   PixmapPtr pixmap = glamor_create_pixmap(screen, width, height, depth,
                                            GLAMOR_CREATE_PIXMAP_NO_TEXTURE);
    if (!pixmap)
       return NullPixmap;
@@ -218,8 +227,8 @@ glamor_egl_create_pixmap_from_opaque_fd(ScreenPtr screen, int w, int h,
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
    glTexStorageMem2DEXT(GL_TEXTURE_2D, 1,
-                        glamor_priv->formats[depth].internalformat, w, h,
-                        pixmap_priv->gl_memory_object_ext, offset);
+                        glamor_priv->formats[depth].internalformat, width,
+                        height, pixmap_priv->gl_memory_object_ext, offset);
    glBindTexture(GL_TEXTURE_2D, 0);
 
    glamor_set_pixmap_type(pixmap, GLAMOR_TEXTURE_ONLY);
