@@ -33,7 +33,7 @@ struct LorieBuffer {
     size_t size;
     off_t offset;
 
-    GLuint id;
+    GLuint id, memobj;
     EGLImage image;
     struct xorg_list link;
 };
@@ -122,6 +122,10 @@ static LorieBuffer* allocate(int32_t width, int32_t stride, int32_t height, int8
                 return NULL;
             }
             break;
+        case LORIEBUFFER_OPAQUE_FD:
+            if (b.fd < 0)
+                return NULL;
+            break;
         case LORIEBUFFER_AHARDWAREBUFFER: {
             if (!b.desc.buffer)
                 return NULL;
@@ -144,6 +148,9 @@ static LorieBuffer* allocate(int32_t width, int32_t stride, int32_t height, int8
                 break;
             case LORIEBUFFER_FD:
                 munmap(b.desc.data, b.size);
+                close(b.fd);
+                break;
+            case LORIEBUFFER_OPAQUE_FD:
                 close(b.fd);
                 break;
             case LORIEBUFFER_AHARDWAREBUFFER:
@@ -183,6 +190,10 @@ __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_allocate(int32_t width, int32_t height,
 
 __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_wrapFileDescriptor(int32_t width, int32_t stride, int32_t height, int8_t format, int fd, off_t offset) {
     return allocate(width, stride, height, format, LORIEBUFFER_FD, NULL, fd, stride * height * sizeof(uint32_t), offset, false);
+}
+
+__LIBC_HIDDEN__ LorieBuffer* LorieBuffer_wrapOpaqueFileDescriptor(int32_t width, int32_t height, int8_t format, int fd, size_t size, off_t offset) {
+    return allocate(width, __BIONIC_ALIGN(width, 32), height, format, LORIEBUFFER_OPAQUE_FD, NULL, fd, size, offset, false);
 }
 
 __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_wrapAHardwareBuffer(AHardwareBuffer* buffer) {
@@ -247,6 +258,10 @@ __LIBC_HIDDEN__ void LorieBuffer_convert(LorieBuffer* buffer, int8_t type, int8_
 }
 
 __LIBC_HIDDEN__ void __LorieBuffer_free(LorieBuffer* buffer) {
+    PFNGLDELETEMEMORYOBJECTSEXTPROC DeleteMemoryObjectsEXT;
+    DeleteMemoryObjectsEXT = (PFNGLDELETEMEMORYOBJECTSEXTPROC)
+        eglGetProcAddress("glDeleteMemoryObjectsEXT");
+
     if (!buffer)
         return;
 
@@ -264,6 +279,12 @@ __LIBC_HIDDEN__ void __LorieBuffer_free(LorieBuffer* buffer) {
             break;
         case LORIEBUFFER_FD:
             munmap(buffer->desc.data, buffer->size);
+            close(buffer->fd);
+            break;
+        case LORIEBUFFER_OPAQUE_FD:
+            if (eglGetCurrentContext() && DeleteMemoryObjectsEXT && buffer->memobj) {
+                DeleteMemoryObjectsEXT(1, &buffer->memobj);
+            }
             close(buffer->fd);
             break;
         case LORIEBUFFER_AHARDWAREBUFFER:
@@ -329,7 +350,7 @@ __LIBC_HIDDEN__ void LorieBuffer_sendHandleToUnixSocket(LorieBuffer* _Nonnull bu
         return;
 
     write(socketFd, buffer, sizeof(*buffer));
-    if (buffer->desc.type == LORIEBUFFER_FD)
+    if (buffer->desc.type == LORIEBUFFER_FD || buffer->desc.type == LORIEBUFFER_OPAQUE_FD)
         ancil_send_fd(socketFd, buffer->fd);
     else if (buffer->desc.type == LORIEBUFFER_AHARDWAREBUFFER)
         AHardwareBuffer_sendHandleToUnixSocket(buffer->desc.buffer, socketFd);
@@ -350,7 +371,7 @@ __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuf
 
     read(socketFd, &buffer, sizeof(buffer));
     buffer.image = NULL; // Only for process-local use
-    if (buffer.desc.type == LORIEBUFFER_FD) {
+    if (buffer.desc.type == LORIEBUFFER_FD || buffer.desc.type == LORIEBUFFER_OPAQUE_FD) {
         size_t size = buffer.desc.stride * buffer.desc.height * sizeof(uint32_t);
         buffer.fd = ancil_recv_fd(socketFd);
         if (buffer.fd == -1) {
@@ -359,12 +380,14 @@ __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuf
             return;
         }
 
-        buffer.desc.data = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED, buffer.fd, 0);
-        if (buffer.desc.data == NULL || buffer.desc.data == MAP_FAILED) {
-            close(buffer.fd);
-            if (outBuffer)
-                *outBuffer = NULL;
-            return;
+        if (buffer.desc.type == LORIEBUFFER_FD) {
+            buffer.desc.data = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED, buffer.fd, 0);
+            if (buffer.desc.data == NULL || buffer.desc.data == MAP_FAILED) {
+                close(buffer.fd);
+                if (outBuffer)
+                    *outBuffer = NULL;
+                return;
+            }
         }
     } else if (buffer.desc.type == LORIEBUFFER_AHARDWAREBUFFER)
         AHardwareBuffer_recvHandleFromUnixSocket(socketFd, &buffer.desc.buffer);
@@ -390,12 +413,41 @@ __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuf
 }
 
 __LIBC_HIDDEN__ void LorieBuffer_attachToGL(LorieBuffer* buffer) {
+    PFNGLCREATEMEMORYOBJECTSEXTPROC CreateMemoryObjectsEXT;
+    PFNGLIMPORTMEMORYFDEXTPROC ImportMemoryFdEXT;
+    PFNGLISMEMORYOBJECTEXTPROC IsMemoryObjectEXT;
+    PFNGLTEXSTORAGEMEM2DEXTPROC TexStorageMem2DEXT;
+    PFNGLDELETEMEMORYOBJECTSEXTPROC DeleteMemoryObjectsEXT;
+
     const EGLint imageAttributes[] = { EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE };
     if (!eglGetCurrentDisplay() || !buffer)
         return;
 
+    CreateMemoryObjectsEXT =
+        (PFNGLCREATEMEMORYOBJECTSEXTPROC)eglGetProcAddress("glCreateMemoryObjectsEXT");
+    ImportMemoryFdEXT =
+        (PFNGLIMPORTMEMORYFDEXTPROC)eglGetProcAddress("glImportMemoryFdEXT");
+    IsMemoryObjectEXT =
+        (PFNGLISMEMORYOBJECTEXTPROC)eglGetProcAddress("glIsMemoryObjectEXT");
+    TexStorageMem2DEXT =
+        (PFNGLTEXSTORAGEMEM2DEXTPROC)eglGetProcAddress("glTexStorageMem2DEXT");
+    DeleteMemoryObjectsEXT =
+        (PFNGLDELETEMEMORYOBJECTSEXTPROC)eglGetProcAddress("glDeleteMemoryObjectsEXT");
+
     if (buffer->image == NULL && buffer->desc.buffer)
         buffer->image = eglCreateImageKHR(eglGetCurrentDisplay(), EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, eglGetNativeClientBufferANDROID(buffer->desc.buffer), imageAttributes);
+
+    if (!buffer->memobj && buffer->desc.type == LORIEBUFFER_OPAQUE_FD &&
+        CreateMemoryObjectsEXT && ImportMemoryFdEXT && IsMemoryObjectEXT &&
+            TexStorageMem2DEXT && DeleteMemoryObjectsEXT) {
+        CreateMemoryObjectsEXT(1, &buffer->memobj);
+        ImportMemoryFdEXT(buffer->memobj, buffer->size, GL_HANDLE_TYPE_OPAQUE_FD_EXT, buffer->fd);
+        if (!IsMemoryObjectEXT(buffer->memobj)) {
+            DeleteMemoryObjectsEXT(1, &buffer->memobj);
+            buffer->memobj = 0;
+            return;
+        }
+    }
 
     glGenTextures(1, &buffer->id);
     glBindTexture(GL_TEXTURE_2D, buffer->id);
@@ -404,8 +456,16 @@ __LIBC_HIDDEN__ void LorieBuffer_attachToGL(LorieBuffer* buffer) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    if (buffer->image)
+    if (buffer->image) {
         glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, buffer->image);
+    }
+    else if (buffer->memobj) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_TILING_EXT,
+                        GL_OPTIMAL_TILING_EXT);
+        TexStorageMem2DEXT(GL_TEXTURE_2D, 1, GL_BGRA8_EXT,
+                           buffer->desc.width, buffer->desc.height,
+                           buffer->memobj, buffer->offset);
+    }
     else if (buffer->desc.data && buffer->desc.width > 0 && buffer->desc.height > 0) {
         int format = buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM ? GL_BGRA_EXT : GL_RGBA;
         // The image will be updated in redraw call because of `drawRequested` flag, so we are not uploading pixels

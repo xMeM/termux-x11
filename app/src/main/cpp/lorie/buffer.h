@@ -11,6 +11,7 @@ enum {
     LORIEBUFFER_UNKNOWN __unused,
     LORIEBUFFER_REGULAR,
     LORIEBUFFER_FD,
+    LORIEBUFFER_OPAQUE_FD,
     LORIEBUFFER_AHARDWAREBUFFER,
 };
 
@@ -58,6 +59,20 @@ LorieBuffer* _Nullable LorieBuffer_allocate(int32_t width, int32_t height, int8_
  * @return
  */
 LorieBuffer* _Nullable LorieBuffer_wrapFileDescriptor(int32_t width, int32_t stride, int32_t height, int8_t format, int fd, off_t offset);
+
+/**
+ * Wraps given memory fragment file descriptor into LorieBuffer.
+ * Takes ownership on the given file descriptor.
+ *
+ * @param width width of buffer.
+ * @param height height of buffer.
+ * @param format format of buffer. Accepts AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM or AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM
+ * @param fd file descriptor of buffer.
+ * @param size size of memory fragment.
+ * @param offset offset inside memory fragment.
+ * @return
+ */
+LorieBuffer* _Nullable LorieBuffer_wrapOpaqueFileDescriptor(int32_t width, int32_t height, int8_t format, int fd, size_t size, off_t offset);
 
 /**
  * Wraps given AHardwareBuffer into LorieBuffer.
