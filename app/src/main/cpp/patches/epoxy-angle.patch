@@ -1,5 +1,5 @@
 diff --git a/src/dispatch_common.c b/src/dispatch_common.c
-index 153eb7c..84d6ab6 100644
+index 153eb7c..564f571 100644
 --- a/src/dispatch_common.c
 +++ b/src/dispatch_common.c
 @@ -114,7 +114,7 @@
@@ -19,10 +19,81 @@ index 153eb7c..84d6ab6 100644
 -#define EGL_LIB "libEGL.so"
 -#define GLES1_LIB "libGLESv1_CM.so"
 -#define GLES2_LIB "libGLESv2.so"
-+#define GLX_LIB "/data/data/com.termux/files/usr/opt/angle-android/vulkan/libGLESv2_angle.so"
-+#define EGL_LIB "/data/data/com.termux/files/usr/opt/angle-android/vulkan/libEGL_angle.so"
-+#define GLES1_LIB "/data/data/com.termux/files/usr/opt/angle-android/vulkan/libGLESv1_CM_angle.so"
-+#define GLES2_LIB "/data/data/com.termux/files/usr/opt/angle-android/vulkan/libGLESv2_angle.so"
++#define GLX_LIB "libGLESv2_angle.so"
++#define EGL_LIB "libEGL_angle.so"
++#define GLES1_LIB "libGLESv1_CM_angle.so"
++#define GLES2_LIB "libGLESv2_angle.so"
  #elif defined(_WIN32)
  #define EGL_LIB "libEGL.dll"
  #define GLES1_LIB "libGLES_CM.dll"
+@@ -289,6 +289,58 @@ library_init(void)
+     library_initialized = true;
+ }
+ 
++#if defined (__ANDROID__)
++#include <dirent.h>
++#include <unistd.h>
++#include <sys/system_properties.h>
++
++static char *
++get_apk_path(const char *package_name) {
++    struct dirent *file;
++    char *apk_path = NULL;
++
++    DIR *dir = opendir("/proc/self/fd/");
++    if (!dir)
++        abort();
++
++    while ((file = readdir(dir))) {
++        if (strncmp(file->d_name, ".", 1)) {
++            char link[PATH_MAX] = {}, target[PATH_MAX] = {};
++            snprintf(link, PATH_MAX - 1, "/proc/self/fd/%s", file->d_name);
++            if (readlink(link, target, PATH_MAX - 1) < 0) {
++                continue;
++            }
++            if (strstr(target, package_name) && strstr(target, "base.apk")) {
++                apk_path = strdup(target);
++                break;
++            }
++        }
++    }
++    closedir(dir);
++    return apk_path;
++}
++
++static void *
++dlopen_in_apk(const char* filename, int flag) {
++    static char abi[PROP_VALUE_MAX] = {};
++    static const char *apk_path = NULL;
++    char *library_path = NULL;
++
++    if (!apk_path)
++        apk_path = get_apk_path("com.termux.x11");
++
++    __system_property_get("ro.product.cpu.abi", abi);
++
++    asprintf(&library_path, "%s!/lib/%s/%s", apk_path, abi, filename);
++    if (!library_path)
++        return NULL;
++
++    void *ret = dlopen(library_path, flag);
++    free(library_path);
++    return ret;
++}
++#endif
++
+ static bool
+ get_dlopen_handle(void **handle, const char *lib_name, bool exit_on_fail, bool load)
+ {
+@@ -310,6 +362,11 @@ get_dlopen_handle(void **handle, const char *lib_name, bool exit_on_fail, bool l
+             flags |= RTLD_NOLOAD;
+ 
+         *handle = dlopen(lib_name, flags);
++#if defined (__ANDROID__)
++        if (!*handle) {
++            *handle = dlopen_in_apk(lib_name, flags);
++        }
++#endif
+         if (!*handle) {
+             if (exit_on_fail) {
+                 fprintf(stderr, "Couldn't open %s: %s\n", lib_name, dlerror());
