@@ -7,16 +7,12 @@
 #pragma ide diagnostic ignored "OCUnusedMacroInspection"
 #pragma ide diagnostic ignored "misc-no-recursion"
 #pragma clang diagnostic ignored "-Wincompatible-pointer-types-discards-qualifiers"
-#define EGL_EGLEXT_PROTOTYPES
-#define GL_GLEXT_PROTOTYPES
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
 #include <android/native_window_jni.h>
 #include <android/log.h>
 #include <dlfcn.h>
+#include <epoxy/gl.h>
+#include <epoxy/egl.h>
 #include <sys/mman.h>
 #include "list.h"
 #include "lorie.h"
@@ -273,6 +269,8 @@ void rendererTestCapabilities(int* legacy_drawing, uint8_t* flip) {
             .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
             .format = AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
     };
+
+    epoxy_set_resolver_failure_handler(eglGetProcAddress);
 
     if (egl_display == EGL_NO_DISPLAY) {
         egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
