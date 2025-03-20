@@ -93,6 +93,7 @@ static lorieScreenInfo lorieScreen = {
         .root.framerate = 30,
         .root.name = "screen",
         .dri3 = TRUE,
+        .glamor = TRUE,
         .vblank_queue = { &lorieScreen.vblank_queue, &lorieScreen.vblank_queue },
 }, *pvfb = &lorieScreen;
 static char *xstartup = NULL;
@@ -264,7 +265,7 @@ void ddxUseMsg(void) {
     ErrorF("-disable-dri3          disabling DRI3 support (to let lavapipe work)\n");
     ErrorF("-force-sysvshm         force using SysV shm syscalls\n");
     ErrorF("-check-drawing         run server only able to draw some test image (for testing if rendering root window works or not),\n");
-    ErrorF("-glamor-gles           experimental opengl es acceleration\n");
+    ErrorF("-disable-glamor        disable glamor acceleration\n");
 }
 
 int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
@@ -300,8 +301,8 @@ int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
         return 1;
     }
 
-    if (strcmp(argv[i], "-glamor-gles") == 0) {
-        pvfb->glamor = TRUE;
+    if (strcmp(argv[i], "-disable-glamor") == 0) {
+        pvfb->glamor = FALSE;
         return 1;
     }
 
