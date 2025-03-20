@@ -999,9 +999,8 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
                 lb = LorieBuffer_wrapOpaqueFileDescriptor(width, height, AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, fcntl(fds[0], F_DUPFD_CLOEXEC, 0),
                                                           strides[0] * height, offsets[0]);
                 check(!lb, "DRI3: LorieBuffer_wrapOpaqueAHardwareBuffer failed.");
-                pixmap = glamor_egl_create_pixmap_from_opaque_fd(screen, width, height, depth, strides[0] * height, offsets[0], fds[0]);
+                pixmap = glamor_egl_create_pixmap_from_lorie_buffer(screen, depth, lb);
                 check(!pixmap, "DRI3: failed to create pixmap from opaque fd");
-                glamor_egl_set_pixmap_lorie_buffer(pixmap, lb);
             } else {
                 check(true, "DRI3: unsupported modifier");
             }

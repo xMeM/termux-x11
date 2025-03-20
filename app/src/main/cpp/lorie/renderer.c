@@ -171,6 +171,8 @@ int rendererInitThread(JavaVM *vm) {
 
     (*vm)->AttachCurrentThread(vm, &env, NULL);
 
+    epoxy_set_resolver_failure_handler(eglGetProcAddress);
+
     egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (egl_display == EGL_NO_DISPLAY)
         return printEglError("Got no EGL display", __LINE__);

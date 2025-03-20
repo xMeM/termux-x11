@@ -253,10 +253,6 @@ __LIBC_HIDDEN__ void LorieBuffer_convert(LorieBuffer* buffer, int8_t type, int8_
 }
 
 __LIBC_HIDDEN__ void __LorieBuffer_free(LorieBuffer* buffer) {
-    PFNGLDELETEMEMORYOBJECTSEXTPROC DeleteMemoryObjectsEXT;
-    DeleteMemoryObjectsEXT = (PFNGLDELETEMEMORYOBJECTSEXTPROC)
-        eglGetProcAddress("glDeleteMemoryObjectsEXT");
-
     if (!buffer)
         return;
 
@@ -277,8 +273,8 @@ __LIBC_HIDDEN__ void __LorieBuffer_free(LorieBuffer* buffer) {
             close(buffer->fd);
             break;
         case LORIEBUFFER_OPAQUE_FD:
-            if (eglGetCurrentContext() && DeleteMemoryObjectsEXT && buffer->memobj) {
-                DeleteMemoryObjectsEXT(1, &buffer->memobj);
+            if (eglGetCurrentContext() && buffer->memobj) {
+                glDeleteMemoryObjectsEXT(1, &buffer->memobj);
             }
             close(buffer->fd);
             break;
@@ -357,6 +353,8 @@ __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuf
     if (socketFd < 0)
         return;
 
+    read(socketFd, &buffer, sizeof(buffer));
+
     // Reset process-specific data;
     buffer.refcount = 0;
     buffer.locked = false;
@@ -364,8 +362,8 @@ __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuf
     buffer.lockedData = NULL;
     __sync_fetch_and_add(&buffer.refcount, 1); // refcount is the first object in the struct
 
-    read(socketFd, &buffer, sizeof(buffer));
     buffer.image = NULL; // Only for process-local use
+    buffer.memobj = 0; // Only for process-local use
     if (buffer.desc.type == LORIEBUFFER_FD || buffer.desc.type == LORIEBUFFER_OPAQUE_FD) {
         size_t size = buffer.desc.stride * buffer.desc.height * sizeof(uint32_t);
         buffer.fd = ancil_recv_fd(socketFd);
@@ -408,37 +406,22 @@ __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuf
 }
 
 __LIBC_HIDDEN__ void LorieBuffer_attachToGL(LorieBuffer* buffer) {
-    PFNGLCREATEMEMORYOBJECTSEXTPROC CreateMemoryObjectsEXT;
-    PFNGLIMPORTMEMORYFDEXTPROC ImportMemoryFdEXT;
-    PFNGLISMEMORYOBJECTEXTPROC IsMemoryObjectEXT;
-    PFNGLTEXSTORAGEMEM2DEXTPROC TexStorageMem2DEXT;
-    PFNGLDELETEMEMORYOBJECTSEXTPROC DeleteMemoryObjectsEXT;
-
     const EGLint imageAttributes[] = { EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE };
     if (!eglGetCurrentDisplay() || !buffer)
         return;
 
-    CreateMemoryObjectsEXT =
-        (PFNGLCREATEMEMORYOBJECTSEXTPROC)eglGetProcAddress("glCreateMemoryObjectsEXT");
-    ImportMemoryFdEXT =
-        (PFNGLIMPORTMEMORYFDEXTPROC)eglGetProcAddress("glImportMemoryFdEXT");
-    IsMemoryObjectEXT =
-        (PFNGLISMEMORYOBJECTEXTPROC)eglGetProcAddress("glIsMemoryObjectEXT");
-    TexStorageMem2DEXT =
-        (PFNGLTEXSTORAGEMEM2DEXTPROC)eglGetProcAddress("glTexStorageMem2DEXT");
-    DeleteMemoryObjectsEXT =
-        (PFNGLDELETEMEMORYOBJECTSEXTPROC)eglGetProcAddress("glDeleteMemoryObjectsEXT");
-
     if (buffer->image == NULL && buffer->desc.buffer)
         buffer->image = eglCreateImageKHR(eglGetCurrentDisplay(), EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, eglGetNativeClientBufferANDROID(buffer->desc.buffer), imageAttributes);
 
-    if (!buffer->memobj && buffer->desc.type == LORIEBUFFER_OPAQUE_FD &&
-        CreateMemoryObjectsEXT && ImportMemoryFdEXT && IsMemoryObjectEXT &&
-            TexStorageMem2DEXT && DeleteMemoryObjectsEXT) {
-        CreateMemoryObjectsEXT(1, &buffer->memobj);
-        ImportMemoryFdEXT(buffer->memobj, buffer->size, GL_HANDLE_TYPE_OPAQUE_FD_EXT, buffer->fd);
-        if (!IsMemoryObjectEXT(buffer->memobj)) {
-            DeleteMemoryObjectsEXT(1, &buffer->memobj);
+    if (!buffer->memobj && buffer->desc.type == LORIEBUFFER_OPAQUE_FD) {
+        int fd = fcntl(buffer->fd, F_DUPFD_CLOEXEC, 0);
+        if (fd < 0)
+            return;
+
+        glCreateMemoryObjectsEXT(1, &buffer->memobj);
+        glImportMemoryFdEXT(buffer->memobj, buffer->size, GL_HANDLE_TYPE_OPAQUE_FD_EXT, fd);
+        if (!glIsMemoryObjectEXT(buffer->memobj)) {
+            glDeleteMemoryObjectsEXT(1, &buffer->memobj);
             buffer->memobj = 0;
             return;
         }
@@ -455,9 +438,7 @@ __LIBC_HIDDEN__ void LorieBuffer_attachToGL(LorieBuffer* buffer) {
         glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, buffer->image);
     }
     else if (buffer->memobj) {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_TILING_EXT,
-                        GL_OPTIMAL_TILING_EXT);
-        TexStorageMem2DEXT(GL_TEXTURE_2D, 1, GL_BGRA8_EXT,
+        glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, GL_BGRA8_EXT,
                            buffer->desc.width, buffer->desc.height,
                            buffer->memobj, buffer->offset);
     }
